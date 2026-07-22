@@ -83,7 +83,7 @@
     <input type="date" id="data">
 
     <label id="labImporto">Importo (€)</label>
-    <input type="number" id="spesa" inputmode="decimal" step="0.01" placeholder="0,00">
+    <input type="text" id="spesa" inputmode="decimal" autocomplete="off" placeholder="0,00">
 
     <label>Categoria</label>
     <select id="categoria"><option>Caricamento…</option></select>
@@ -155,8 +155,11 @@
     document.getElementById('btn').addEventListener('click', function () {
       var msg = document.getElementById('msg');
       var btn = document.getElementById('btn');
-      var spesa = document.getElementById('spesa').value;
+      var spesa = document.getElementById('spesa').value.trim();
       if (!spesa) { msg.className = 'err'; msg.textContent = 'Inserisci un importo.'; return; }
+      if (isNaN(parseFloat(spesa.replace(',', '.')))) {
+        msg.className = 'err'; msg.textContent = 'Importo non valido.'; return;
+      }
 
       var dati = {
         gid: gid(),
