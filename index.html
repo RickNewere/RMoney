@@ -68,6 +68,9 @@
     .debtLbl { font-size:14px; color:var(--text); }
     .debtVal { font-size:17px; font-weight:800; color:var(--accent); white-space:nowrap; }
     .debtVal.zero { color:var(--muted); font-weight:600; font-size:14px; }
+    .saldaBtn { width:100%; margin-top:14px; padding:11px; border-radius:12px; border:1px solid var(--border); background:transparent; color:var(--muted); font-size:14px; font-weight:700; }
+    .saldaBtn:disabled { opacity:.5; }
+    .saldaMsg { text-align:center; margin-top:8px; font-size:13px; font-weight:600; min-height:16px; }
   </style>
 </head>
 <body>
@@ -83,6 +86,8 @@
       <span class="debtLbl" id="debtNetLbl">Saldo netto</span>
       <span class="debtVal" id="debtNetVal">…</span>
     </div>
+    <button id="saldaBtn" class="saldaBtn">Segna come saldato</button>
+    <div id="saldaMsg" class="saldaMsg"></div>
   </div>
 
   <div class="card">
@@ -112,7 +117,7 @@
 
     <div class="check" id="check">
       <div class="box" id="checkBox"></div>
-      <span>Aggiungi «−» a destra della nota</span>
+      <span>Spesa condivisa (dividi a metà)</span>
     </div>
 
     <button id="btn">Aggiungi spesa</button>
@@ -189,6 +194,8 @@
       netLbl.textContent = 'Saldo netto ' + conto;
       foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
       netVal.textContent = '…'; netVal.className = 'debtVal';
+      document.getElementById('saldaBtn').textContent = 'Saldato · azzera split ' + persona + ' ' + conto;
+      document.getElementById('saldaMsg').textContent = '';
 
       fetch(API + '?action=debito&gid=' + gid() + '&gidPartner=' + partnerGid())
         .then(function (r) { return r.json(); })
@@ -226,6 +233,35 @@
         });
     }
     caricaDebito();
+
+    // Bottone "saldato": azzera le spunte split del SOLO foglio selezionato.
+    document.getElementById('saldaBtn').addEventListener('click', function () {
+      var m = document.getElementById('saldaMsg');
+      var ok = confirm('Azzerare tutte le spunte "split" di ' + persona + ' ' + conto + '?\n\n'
+        + 'Le spese restano nel foglio: vengono solo tolte le spunte, quindi non saranno più conteggiate come condivise.');
+      if (!ok) return;
+      var btn = this;
+      btn.disabled = true; m.className = 'saldaMsg'; m.textContent = 'Azzeramento…';
+      fetch(API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ op: 'salda', gid: gid() })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j && j.ok) {
+            caricaDebito(); // ricalcola prima (azzera saldaMsg internamente)
+            m.className = 'saldaMsg ok'; m.textContent = '✓ Azzerate ' + (j.azzerate || 0) + ' spunte';
+          } else {
+            m.className = 'saldaMsg err'; m.textContent = 'Errore: ' + ((j && j.error) || 'sconosciuto');
+          }
+          btn.disabled = false;
+        })
+        .catch(function (e) {
+          m.className = 'saldaMsg err'; m.textContent = 'Errore di rete: ' + e.message;
+          btn.disabled = false;
+        });
+    });
 
     document.getElementById('btn').addEventListener('click', function () {
       var msg = document.getElementById('msg');
