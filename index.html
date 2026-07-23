@@ -61,10 +61,29 @@
     #btn:disabled { background:var(--accentDim); }
     #msg { text-align:center; margin-top:16px; font-weight:700; min-height:22px; font-size:15px; }
     .ok { color:#16a34a; } .err { color:#dc2626; }
+    .debt { padding:14px 18px; margin-bottom:14px; }
+    .debtTitle { font-size:12px; font-weight:800; color:var(--muted); margin-bottom:10px; text-transform:uppercase; letter-spacing:.5px; }
+    .debtRow { display:flex; justify-content:space-between; align-items:baseline; gap:12px; padding:6px 0; }
+    .debtRow.net { border-top:1px solid var(--border); margin-top:4px; padding-top:12px; }
+    .debtLbl { font-size:14px; color:var(--text); }
+    .debtVal { font-size:17px; font-weight:800; color:var(--accent); white-space:nowrap; }
+    .debtVal.zero { color:var(--muted); font-weight:600; font-size:14px; }
   </style>
 </head>
 <body>
   <div class="brand">💸 RMoney</div>
+
+  <div class="card debt" id="debt">
+    <div class="debtTitle">Debito condiviso</div>
+    <div class="debtRow">
+      <span class="debtLbl" id="debtFoglioLbl">Dal foglio</span>
+      <span class="debtVal" id="debtFoglioVal">…</span>
+    </div>
+    <div class="debtRow net">
+      <span class="debtLbl" id="debtNetLbl">Saldo netto</span>
+      <span class="debtVal" id="debtNetVal">…</span>
+    </div>
+  </div>
 
   <div class="card">
     <label>Persona</label>
@@ -120,11 +139,12 @@
         onPick(b.getAttribute('data-v'));
       });
     }
-    initSeg('persona', function (v) { persona = v; caricaCategorie(); });
+    initSeg('persona', function (v) { persona = v; caricaCategorie(); caricaDebito(); });
     initSeg('conto', function (v) {
       conto = v;
       document.getElementById('labImporto').textContent = 'Importo (' + (v === 'Euro' ? '€' : 'CHF') + ')';
       caricaCategorie();
+      caricaDebito();
     });
 
     document.getElementById('check').addEventListener('click', function () {
@@ -151,6 +171,61 @@
         .catch(function () { sel.innerHTML = '<option value="">(errore categorie)</option>'; });
     }
     caricaCategorie();
+
+    // ---- Debito condiviso (righe col trattino) ----
+    function altraPersona() { return persona === 'Riccardo' ? 'Roberta' : 'Riccardo'; }
+    function partnerGid() { return TABS[altraPersona()][conto]; }
+    function simbolo() { return conto === 'Euro' ? '€' : 'CHF'; }
+    function fmtImporto(n) {
+      return simbolo() + ' ' + (Math.round(n * 100) / 100).toFixed(2).replace('.', ',');
+    }
+
+    function caricaDebito() {
+      var foglioLbl = document.getElementById('debtFoglioLbl');
+      var foglioVal = document.getElementById('debtFoglioVal');
+      var netLbl = document.getElementById('debtNetLbl');
+      var netVal = document.getElementById('debtNetVal');
+      foglioLbl.textContent = altraPersona() + ' deve a ' + persona;
+      netLbl.textContent = 'Saldo netto ' + conto;
+      foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
+      netVal.textContent = '…'; netVal.className = 'debtVal';
+
+      fetch(API + '?action=debito&gid=' + gid() + '&gidPartner=' + partnerGid())
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          var d = j && j.debito;
+          if (!d || !d.mio) { foglioVal.textContent = '—'; netVal.textContent = '—'; return; }
+
+          // Meta condivisa di questo foglio (quanto l'altra persona deve).
+          if (d.mio.meta > 0.005) {
+            foglioVal.textContent = fmtImporto(d.mio.meta);
+            foglioVal.className = 'debtVal';
+          } else {
+            foglioVal.textContent = 'nessuna spesa condivisa';
+            foglioVal.className = 'debtVal zero';
+          }
+
+          // Saldo netto per valuta: meta(mio) - meta(partner).
+          var netto = d.netto || 0;
+          var abs = Math.abs(netto);
+          if (abs < 0.005) {
+            netLbl.textContent = 'Saldo netto ' + conto;
+            netVal.textContent = 'in pari';
+            netVal.className = 'debtVal zero';
+          } else {
+            var chi = netto > 0 ? altraPersona() : persona;
+            var aChi = netto > 0 ? persona : altraPersona();
+            netLbl.textContent = chi + ' deve a ' + aChi + ' (' + conto + ')';
+            netVal.textContent = fmtImporto(abs);
+            netVal.className = 'debtVal';
+          }
+        })
+        .catch(function () {
+          foglioVal.textContent = '(errore)'; foglioVal.className = 'debtVal zero';
+          netVal.textContent = '';
+        });
+    }
+    caricaDebito();
 
     document.getElementById('btn').addEventListener('click', function () {
       var msg = document.getElementById('msg');
@@ -185,6 +260,7 @@
             segno = false;
             document.getElementById('checkBox').classList.remove('on');
             document.getElementById('checkBox').textContent = '';
+            if (dati.segno) caricaDebito(); // spesa condivisa: aggiorna il totale
           } else {
             msg.className = 'err'; msg.textContent = 'Errore: ' + ((j && j.error) || 'sconosciuto');
           }
