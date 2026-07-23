@@ -81,6 +81,12 @@
     .secTitle { font-size:12px; font-weight:800; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:12px; }
     .card + .card { margin-top:14px; }
     canvas { max-width:100%; }
+    .donutRow { display:flex; gap:6px; margin-top:16px; }
+    .donutCell { flex:1; min-width:0; text-align:center; }
+    .donutTit { font-size:12px; font-weight:700; color:var(--muted); margin-bottom:6px; }
+    .donutLegend { text-align:center; margin-top:12px; font-size:12px; color:var(--muted); }
+    .donutLegend .dl { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 4px 0 10px; vertical-align:middle; }
+    .donutLegend .dl.s { background:#ec4899; } .donutLegend .dl.e { background:#16a34a; }
     #riepMsg { text-align:center; margin-top:14px; font-weight:700; min-height:22px; font-size:15px; }
   </style>
 </head>
@@ -154,6 +160,16 @@
         <button data-v="Euro" class="on">Euro</button>
         <button data-v="Franchi">Franchi</button>
       </div>
+
+      <div id="wrapAnno">
+        <label>Anno</label>
+        <select id="riepAnno"></select>
+      </div>
+      <div id="wrapMese" style="display:none">
+        <label>Mese</label>
+        <input type="month" id="riepMese">
+      </div>
+
       <div class="periodLbl" id="riepPeriodoLbl"></div>
     </div>
 
@@ -163,7 +179,12 @@
         <div class="ovCell"><div class="ovLbl">Uscite</div><div class="ovVal" id="ovUscite">…</div></div>
         <div class="ovCell"><div class="ovLbl">Risparmio</div><div class="ovVal" id="ovRisparmio">…</div></div>
       </div>
-      <div style="margin-top:16px"><canvas id="chDonut" height="200"></canvas></div>
+      <div class="donutRow">
+        <div class="donutCell"><div class="donutTit">Roberta</div><canvas id="chDonutRob"></canvas></div>
+        <div class="donutCell"><div class="donutTit">Riccardo</div><canvas id="chDonutRicc"></canvas></div>
+        <div class="donutCell"><div class="donutTit">Totale</div><canvas id="chDonutTot"></canvas></div>
+      </div>
+      <div class="donutLegend"><span class="dl s"></span>Spese <span class="dl e"></span>Entrate</div>
     </div>
 
     <div class="card">
@@ -186,7 +207,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script>
-    var API = 'https://script.google.com/macros/s/AKfycby5KeAKOCtIP7Xz1KWrwJfqVkmL32WnsyDGBmmAUWeMWvGYNG8vMy_se5LFdyV4M2kV/exec';
+    var API = 'https://script.google.com/macros/s/AKfycbwMZ4nRTwIG3XdGAgBsF2cnySkTBgGvVSASDGnfj28eUxfZfHi-dOjIp2AzPQMAgO1D/exec';
     var TABS = {
       Riccardo: { Euro: 113020932, Franchi: 650699013 },
       Roberta:  { Euro: 1888286288, Franchi: 1063479927 }
@@ -370,12 +391,21 @@
     });
 
     // ==================== Riepilogo ====================
-    var RIEP_GIDS = {
-      Annuale: { Euro: 738641296, Franchi: 637629592 },
-      Mensile: { Euro: 282752746, Franchi: 387921258 }
-    };
-    var riepP = 'Annuale', riepC = 'Euro', riepLoaded = false;
+    var riepP = 'Annuale', riepC = 'Euro';
     var charts = {}; // istanze Chart.js, per distruggerle prima di ricrearle
+
+    // Popola il selettore anno (dal 2024 all'anno corrente) e il mese corrente.
+    (function initPeriodo() {
+      var annoSel = document.getElementById('riepAnno');
+      var ora = new Date();
+      for (var y = ora.getFullYear(); y >= 2024; y--) {
+        var o = document.createElement('option');
+        o.value = y; o.textContent = y; annoSel.appendChild(o);
+      }
+      annoSel.value = ora.getFullYear();
+      document.getElementById('riepMese').value =
+        ora.getFullYear() + '-' + String(ora.getMonth() + 1).padStart(2, '0');
+    })();
 
     function riepSimbolo() { return riepC === 'Euro' ? '€' : 'CHF'; }
     function riepFmt(n) {
@@ -404,14 +434,28 @@
       if (v === 'riepilogo') caricaRiepilogo();
     });
 
-    initSeg('riepPeriodo', function (v) { riepP = v; caricaRiepilogo(); });
+    initSeg('riepPeriodo', function (v) {
+      riepP = v;
+      var an = v === 'Annuale';
+      document.getElementById('wrapAnno').style.display = an ? '' : 'none';
+      document.getElementById('wrapMese').style.display = an ? 'none' : '';
+      caricaRiepilogo();
+    });
     initSeg('riepValuta', function (v) { riepC = v; caricaRiepilogo(); });
+    document.getElementById('riepAnno').addEventListener('change', caricaRiepilogo);
+    document.getElementById('riepMese').addEventListener('change', caricaRiepilogo);
 
     function caricaRiepilogo() {
       var m = document.getElementById('riepMsg');
       m.className = ''; m.textContent = 'Caricamento…';
-      var gidS = RIEP_GIDS[riepP][riepC];
-      fetch(API + '?action=riepilogo&gid=' + gidS)
+      var url = API + '?action=riep&conto=' + riepC + '&tipo=' + (riepP === 'Annuale' ? 'annuale' : 'mensile');
+      if (riepP === 'Annuale') {
+        url += '&anno=' + document.getElementById('riepAnno').value;
+      } else {
+        var mm = (document.getElementById('riepMese').value || '').split('-');
+        url += '&anno=' + (mm[0] || '') + '&mese=' + (parseInt(mm[1], 10) || '');
+      }
+      fetch(url)
         .then(function (r) { return r.json(); })
         .then(function (j) {
           var d = j && j.riepilogo;
@@ -438,25 +482,27 @@
       Chart.defaults.color = txt;
       Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
 
-      // --- Donut: spese vs entrate ---
-      destroyChart('donut');
-      charts.donut = new Chart(document.getElementById('chDonut'), {
-        type: 'doughnut',
-        data: {
-          labels: ['Spese', 'Entrate'],
-          datasets: [{ data: [ov.uscite, ov.entrate], backgroundColor: ['#ec4899', '#16a34a'], borderWidth: 0 }]
-        },
-        options: {
-          plugins: {
-            legend: { position: 'bottom' },
-            tooltip: { callbacks: { label: function (c) { return c.label + ': ' + riepFmt(c.raw); } } }
-          },
-          cutout: '60%'
-        }
-      });
+      // --- Donut per persona: spese vs entrate (Roberta, Riccardo, Totale) ---
+      var e = d.entrate || {}, s = d.risparmio || {};
+      function donut(id, spese, entrate) {
+        destroyChart(id);
+        charts[id] = new Chart(document.getElementById(id), {
+          type: 'doughnut',
+          data: { labels: ['Spese', 'Entrate'], datasets: [{ data: [spese, entrate], backgroundColor: ['#ec4899', '#16a34a'], borderWidth: 0 }] },
+          options: {
+            plugins: {
+              legend: { display: false },
+              tooltip: { callbacks: { label: function (c) { return c.label + ': ' + riepFmt(c.raw); } } }
+            },
+            cutout: '55%'
+          }
+        });
+      }
+      donut('chDonutRob', (e.roberta || 0) - (s.roberta || 0), e.roberta || 0);
+      donut('chDonutRicc', (e.riccardo || 0) - (s.riccardo || 0), e.riccardo || 0);
+      donut('chDonutTot', ov.uscite, ov.entrate);
 
       // --- Barre: entrate / risparmio / spese per persona ---
-      var e = d.entrate || {}, s = d.risparmio || {};
       var persone = ['Roberta', 'Riccardo', 'Totale'];
       var kEntr = [e.roberta || 0, e.riccardo || 0, e.totale || 0];
       var kRisp = [s.roberta || 0, s.riccardo || 0, s.totale || 0];
