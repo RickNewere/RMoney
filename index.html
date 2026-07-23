@@ -379,7 +379,7 @@
 
     function riepSimbolo() { return riepC === 'Euro' ? '€' : 'CHF'; }
     function riepFmt(n) {
-      var s = (Math.round(Math.abs(n) * 100) / 100).toFixed(2).replace('.', ',');
+      var s = Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       return (n < 0 ? '-' : '') + riepSimbolo() + ' ' + s;
     }
     function chartTextColor() {
