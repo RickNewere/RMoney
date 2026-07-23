@@ -87,6 +87,10 @@
     .donutLegend { text-align:center; margin-top:12px; font-size:12px; color:var(--muted); }
     .donutLegend .dl { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 4px 0 10px; vertical-align:middle; }
     .donutLegend .dl.s { background:#ec4899; } .donutLegend .dl.e { background:#16a34a; }
+    .donutVals { margin-top:8px; font-size:11px; line-height:1.6; }
+    .donutVals div { white-space:nowrap; }
+    .donutVals .dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:4px; vertical-align:middle; }
+    .donutVals .dot.s { background:#ec4899; } .donutVals .dot.e { background:#16a34a; }
     #riepMsg { text-align:center; margin-top:14px; font-weight:700; min-height:22px; font-size:15px; }
   </style>
 </head>
@@ -180,9 +184,9 @@
         <div class="ovCell"><div class="ovLbl">Risparmio</div><div class="ovVal" id="ovRisparmio">…</div></div>
       </div>
       <div class="donutRow">
-        <div class="donutCell"><div class="donutTit">Roberta</div><canvas id="chDonutRob"></canvas></div>
-        <div class="donutCell"><div class="donutTit">Riccardo</div><canvas id="chDonutRicc"></canvas></div>
-        <div class="donutCell"><div class="donutTit">Totale</div><canvas id="chDonutTot"></canvas></div>
+        <div class="donutCell"><div class="donutTit">Roberta</div><canvas id="chDonutRob"></canvas><div class="donutVals" id="valsRob"></div></div>
+        <div class="donutCell"><div class="donutTit">Riccardo</div><canvas id="chDonutRicc"></canvas><div class="donutVals" id="valsRicc"></div></div>
+        <div class="donutCell"><div class="donutTit">Totale</div><canvas id="chDonutTot"></canvas><div class="donutVals" id="valsTot"></div></div>
       </div>
       <div class="donutLegend"><span class="dl s"></span>Spese <span class="dl e"></span>Entrate</div>
     </div>
@@ -490,23 +494,22 @@
 
       // --- Donut per persona: spese vs entrate (Roberta, Riccardo, Totale) ---
       var e = d.entrate || {}, s = d.risparmio || {};
-      function donut(id, spese, entrate) {
+      function donut(id, valsId, spese, entrate) {
         destroyChart(id);
         charts[id] = new Chart(document.getElementById(id), {
           type: 'doughnut',
           data: { labels: ['Spese', 'Entrate'], datasets: [{ data: [spese, entrate], backgroundColor: ['#ec4899', '#16a34a'], borderWidth: 0 }] },
-          options: {
-            plugins: {
-              legend: { display: false },
-              tooltip: { callbacks: { label: function (c) { return c.label + ': ' + riepFmt(c.raw); } } }
-            },
-            cutout: '55%'
-          }
+          options: { plugins: { legend: { display: false }, tooltip: { enabled: false } }, cutout: '55%' }
         });
+        // Valori sempre visibili sotto la torta (i numeri CHF sono troppo grandi
+        // per un tooltip su un canvas cosi' piccolo).
+        document.getElementById(valsId).innerHTML =
+          '<div><span class="dot s"></span>' + riepFmt(spese) + '</div>' +
+          '<div><span class="dot e"></span>' + riepFmt(entrate) + '</div>';
       }
-      donut('chDonutRob', (e.roberta || 0) - (s.roberta || 0), e.roberta || 0);
-      donut('chDonutRicc', (e.riccardo || 0) - (s.riccardo || 0), e.riccardo || 0);
-      donut('chDonutTot', ov.uscite, ov.entrate);
+      donut('chDonutRob', 'valsRob', (e.roberta || 0) - (s.roberta || 0), e.roberta || 0);
+      donut('chDonutRicc', 'valsRicc', (e.riccardo || 0) - (s.riccardo || 0), e.riccardo || 0);
+      donut('chDonutTot', 'valsTot', ov.uscite, ov.entrate);
 
       // --- Barre: entrate / risparmio / spese per persona ---
       var persone = ['Roberta', 'Riccardo', 'Totale'];
