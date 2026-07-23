@@ -71,11 +71,28 @@
     .saldaBtn { width:100%; margin-top:14px; padding:11px; border-radius:12px; border:1px solid var(--border); background:transparent; color:var(--muted); font-size:14px; font-weight:700; }
     .saldaBtn:disabled { opacity:.5; }
     .saldaMsg { text-align:center; margin-top:8px; font-size:13px; font-weight:600; min-height:16px; }
+    .topToggle { max-width:480px; margin:0 auto 14px; }
+    .periodLbl { text-align:center; font-size:13px; color:var(--muted); margin-top:12px; }
+    .ovGrid { display:flex; gap:10px; }
+    .ovCell { flex:1; text-align:center; padding:10px 6px; border:1px solid var(--border); border-radius:12px; }
+    .ovLbl { font-size:11px; font-weight:800; color:var(--muted); text-transform:uppercase; letter-spacing:.4px; }
+    .ovVal { font-size:16px; font-weight:800; margin-top:4px; white-space:nowrap; }
+    .ovVal.pos { color:#16a34a; } .ovVal.neg { color:#dc2626; }
+    .secTitle { font-size:12px; font-weight:800; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:12px; }
+    .card + .card { margin-top:14px; }
+    canvas { max-width:100%; }
+    #riepMsg { text-align:center; margin-top:14px; font-weight:700; min-height:22px; font-size:15px; }
   </style>
 </head>
 <body>
   <div class="brand">💸 RMoney</div>
 
+  <div class="seg topToggle" id="topToggle">
+    <button data-v="inserisci" class="on">Inserisci</button>
+    <button data-v="riepilogo">Riepilogo</button>
+  </div>
+
+  <div id="viewInserisci">
   <div class="card debt" id="debt">
     <div class="debtTitle">Debito condiviso</div>
     <div class="debtRow">
@@ -123,9 +140,53 @@
     <button id="btn">Aggiungi spesa</button>
     <div id="msg"></div>
   </div>
+  </div><!-- /viewInserisci -->
 
+  <div id="viewRiepilogo" style="display:none">
+    <div class="card">
+      <label>Periodo</label>
+      <div class="seg" id="riepPeriodo">
+        <button data-v="Annuale" class="on">Annuale</button>
+        <button data-v="Mensile">Mensile</button>
+      </div>
+      <label>Valuta</label>
+      <div class="seg" id="riepValuta">
+        <button data-v="Euro" class="on">Euro</button>
+        <button data-v="Franchi">Franchi</button>
+      </div>
+      <div class="periodLbl" id="riepPeriodoLbl"></div>
+    </div>
+
+    <div class="card">
+      <div class="ovGrid">
+        <div class="ovCell"><div class="ovLbl">Entrate</div><div class="ovVal" id="ovEntrate">…</div></div>
+        <div class="ovCell"><div class="ovLbl">Uscite</div><div class="ovVal" id="ovUscite">…</div></div>
+        <div class="ovCell"><div class="ovLbl">Risparmio</div><div class="ovVal" id="ovRisparmio">…</div></div>
+      </div>
+      <div style="margin-top:16px"><canvas id="chDonut" height="200"></canvas></div>
+    </div>
+
+    <div class="card">
+      <div class="secTitle">Entrate · Risparmio · Spese</div>
+      <canvas id="chBar" height="200"></canvas>
+    </div>
+
+    <div class="card" id="cardAndamento">
+      <div class="secTitle">Andamento risparmio mensile</div>
+      <canvas id="chLine" height="230"></canvas>
+    </div>
+
+    <div class="card">
+      <div class="secTitle">Spese per categoria</div>
+      <canvas id="chCat" height="420"></canvas>
+    </div>
+
+    <div id="riepMsg"></div>
+  </div><!-- /viewRiepilogo -->
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script>
-    var API = 'https://script.google.com/macros/s/AKfycbyomawPXGhWumt9AHKr1U3ulGNQ0sz-OxDBHrFXbr5U8bH3aqHUuEkJPOEr7fwGyTt6_A/exec';
+    var API = 'https://script.google.com/macros/s/AKfycby5KeAKOCtIP7Xz1KWrwJfqVkmL32WnsyDGBmmAUWeMWvGYNG8vMy_se5LFdyV4M2kV/exec';
     var TABS = {
       Riccardo: { Euro: 113020932, Franchi: 650699013 },
       Roberta:  { Euro: 1888286288, Franchi: 1063479927 }
@@ -307,6 +368,189 @@
           btn.disabled = false;
         });
     });
+
+    // ==================== Riepilogo ====================
+    var RIEP_GIDS = {
+      Annuale: { Euro: 738641296, Franchi: 637629592 },
+      Mensile: { Euro: 282752746, Franchi: 387921258 }
+    };
+    var riepP = 'Annuale', riepC = 'Euro', riepLoaded = false;
+    var charts = {}; // istanze Chart.js, per distruggerle prima di ricrearle
+
+    function riepSimbolo() { return riepC === 'Euro' ? '€' : 'CHF'; }
+    function riepFmt(n) {
+      var s = (Math.round(Math.abs(n) * 100) / 100).toFixed(2).replace('.', ',');
+      return (n < 0 ? '-' : '') + riepSimbolo() + ' ' + s;
+    }
+    function chartTextColor() {
+      return getComputedStyle(document.body).getPropertyValue('--text').trim() || '#333';
+    }
+    function gridColor() {
+      return getComputedStyle(document.body).getPropertyValue('--border').trim() || '#ccc';
+    }
+    // Palette per categorie/serie.
+    var PAL = ['#2563eb', '#ec4899', '#16a34a', '#f59e0b', '#8b5cf6', '#06b6d4',
+               '#ef4444', '#10b981', '#f97316', '#6366f1'];
+
+    function destroyChart(k) { if (charts[k]) { charts[k].destroy(); charts[k] = null; } }
+
+    document.getElementById('topToggle').addEventListener('click', function (ev) {
+      var b = ev.target.closest('button'); if (!b) return;
+      [].forEach.call(this.children, function (c) { c.classList.remove('on'); });
+      b.classList.add('on');
+      var v = b.getAttribute('data-v');
+      document.getElementById('viewInserisci').style.display = v === 'inserisci' ? '' : 'none';
+      document.getElementById('viewRiepilogo').style.display = v === 'riepilogo' ? '' : 'none';
+      if (v === 'riepilogo') caricaRiepilogo();
+    });
+
+    initSeg('riepPeriodo', function (v) { riepP = v; caricaRiepilogo(); });
+    initSeg('riepValuta', function (v) { riepC = v; caricaRiepilogo(); });
+
+    function caricaRiepilogo() {
+      var m = document.getElementById('riepMsg');
+      m.className = ''; m.textContent = 'Caricamento…';
+      var gidS = RIEP_GIDS[riepP][riepC];
+      fetch(API + '?action=riepilogo&gid=' + gidS)
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          var d = j && j.riepilogo;
+          if (!d) { m.className = 'err'; m.textContent = 'Nessun dato.'; return; }
+          m.textContent = '';
+          renderRiepilogo(d);
+        })
+        .catch(function (e) { m.className = 'err'; m.textContent = 'Errore di rete: ' + e.message; });
+    }
+
+    function renderRiepilogo(d) {
+      var per = d.periodo || {};
+      document.getElementById('riepPeriodoLbl').textContent =
+        (per.inizio ? per.inizio : '') + (per.fine ? ' → ' + per.fine : '');
+
+      var ov = d.overview || { entrate: 0, uscite: 0, totale: 0 };
+      document.getElementById('ovEntrate').textContent = riepFmt(ov.entrate);
+      document.getElementById('ovUscite').textContent = riepFmt(ov.uscite);
+      var risp = document.getElementById('ovRisparmio');
+      risp.textContent = riepFmt(ov.totale);
+      risp.className = 'ovVal ' + (ov.totale < 0 ? 'neg' : 'pos');
+
+      var txt = chartTextColor(), grid = gridColor();
+      Chart.defaults.color = txt;
+      Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+
+      // --- Donut: spese vs entrate ---
+      destroyChart('donut');
+      charts.donut = new Chart(document.getElementById('chDonut'), {
+        type: 'doughnut',
+        data: {
+          labels: ['Spese', 'Entrate'],
+          datasets: [{ data: [ov.uscite, ov.entrate], backgroundColor: ['#ec4899', '#16a34a'], borderWidth: 0 }]
+        },
+        options: {
+          plugins: {
+            legend: { position: 'bottom' },
+            tooltip: { callbacks: { label: function (c) { return c.label + ': ' + riepFmt(c.raw); } } }
+          },
+          cutout: '60%'
+        }
+      });
+
+      // --- Barre: entrate / risparmio / spese per persona ---
+      var e = d.entrate || {}, s = d.risparmio || {};
+      var persone = ['Roberta', 'Riccardo', 'Totale'];
+      var kEntr = [e.roberta || 0, e.riccardo || 0, e.totale || 0];
+      var kRisp = [s.roberta || 0, s.riccardo || 0, s.totale || 0];
+      var kSpese = kEntr.map(function (x, i) { return x - kRisp[i]; });
+      destroyChart('bar');
+      charts.bar = new Chart(document.getElementById('chBar'), {
+        type: 'bar',
+        data: {
+          labels: persone,
+          datasets: [
+            { label: 'Entrate', data: kEntr, backgroundColor: '#16a34a' },
+            { label: 'Spese', data: kSpese, backgroundColor: '#ec4899' },
+            { label: 'Risparmio', data: kRisp, backgroundColor: '#2563eb' }
+          ]
+        },
+        options: {
+          plugins: {
+            legend: { position: 'bottom' },
+            tooltip: { callbacks: { label: function (c) { return c.dataset.label + ': ' + riepFmt(c.raw); } } }
+          },
+          scales: {
+            x: { grid: { display: false } },
+            y: { grid: { color: grid }, ticks: { callback: function (v) { return riepSimbolo() + ' ' + v; } } }
+          }
+        }
+      });
+
+      // --- Linea: andamento risparmio mensile (solo annuale) ---
+      var cardAnd = document.getElementById('cardAndamento');
+      if (d.andamento && d.andamento.mesi && d.andamento.mesi.length) {
+        cardAnd.style.display = '';
+        var a = d.andamento;
+        destroyChart('line');
+        charts.line = new Chart(document.getElementById('chLine'), {
+          type: 'line',
+          data: {
+            labels: a.mesi,
+            datasets: [
+              { label: 'Roberta', data: a.roberta, borderColor: '#8b5cf6', backgroundColor: '#8b5cf6', tension: .3, pointRadius: 2 },
+              { label: 'Riccardo', data: a.riccardo, borderColor: '#16a34a', backgroundColor: '#16a34a', tension: .3, pointRadius: 2 },
+              { label: 'Totale', data: a.totale, borderColor: '#ec4899', backgroundColor: '#ec4899', tension: .3, pointRadius: 2 }
+            ]
+          },
+          options: {
+            plugins: {
+              legend: { position: 'bottom' },
+              tooltip: { callbacks: { label: function (c) { return c.dataset.label + ': ' + riepFmt(c.raw); } } }
+            },
+            scales: {
+              x: { grid: { display: false }, ticks: { maxRotation: 90, minRotation: 45, font: { size: 9 } } },
+              y: { grid: { color: grid }, ticks: { callback: function (v) { return riepSimbolo() + ' ' + v; } } }
+            }
+          }
+        });
+      } else {
+        cardAnd.style.display = 'none';
+        destroyChart('line');
+      }
+
+      // --- Barre orizzontali: spese per categoria, Riccardo vs Roberta ---
+      var spR = (d.spese && d.spese.roberta) || [];
+      var spI = (d.spese && d.spese.riccardo) || [];
+      var cats = [];
+      spI.forEach(function (x) { if (cats.indexOf(x.categoria) < 0) cats.push(x.categoria); });
+      spR.forEach(function (x) { if (cats.indexOf(x.categoria) < 0) cats.push(x.categoria); });
+      function valFor(list, cat) {
+        for (var i = 0; i < list.length; i++) if (list[i].categoria === cat) return list[i].importo;
+        return 0;
+      }
+      var dRicc = cats.map(function (c) { return valFor(spI, c); });
+      var dRob = cats.map(function (c) { return valFor(spR, c); });
+      destroyChart('cat');
+      charts.cat = new Chart(document.getElementById('chCat'), {
+        type: 'bar',
+        data: {
+          labels: cats,
+          datasets: [
+            { label: 'Riccardo', data: dRicc, backgroundColor: '#2563eb' },
+            { label: 'Roberta', data: dRob, backgroundColor: '#ec4899' }
+          ]
+        },
+        options: {
+          indexAxis: 'y',
+          plugins: {
+            legend: { position: 'bottom' },
+            tooltip: { callbacks: { label: function (c) { return c.dataset.label + ': ' + riepFmt(c.raw); } } }
+          },
+          scales: {
+            x: { grid: { color: grid }, ticks: { callback: function (v) { return riepSimbolo() + ' ' + v; } } },
+            y: { grid: { display: false }, ticks: { font: { size: 11 } } }
+          }
+        }
+      });
+    }
   </script>
 </body>
 </html>
