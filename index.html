@@ -393,6 +393,7 @@
     // ==================== Riepilogo ====================
     var riepP = 'Annuale', riepC = 'Euro';
     var charts = {}; // istanze Chart.js, per distruggerle prima di ricrearle
+    var riepReq = 0; // token per ignorare risposte fuori ordine (race condition)
 
     // Popola il selettore anno (dal 2024 all'anno corrente) e il mese corrente.
     (function initPeriodo() {
@@ -448,6 +449,7 @@
     function caricaRiepilogo() {
       var m = document.getElementById('riepMsg');
       m.className = ''; m.textContent = 'Caricamento…';
+      var myReq = ++riepReq; // solo l'ultima richiesta puo' renderizzare
       var url = API + '?action=riep&conto=' + riepC + '&tipo=' + (riepP === 'Annuale' ? 'annuale' : 'mensile');
       if (riepP === 'Annuale') {
         url += '&anno=' + document.getElementById('riepAnno').value;
@@ -458,12 +460,16 @@
       fetch(url)
         .then(function (r) { return r.json(); })
         .then(function (j) {
+          if (myReq !== riepReq) return; // risposta superata da una piu' recente
           var d = j && j.riepilogo;
           if (!d) { m.className = 'err'; m.textContent = 'Nessun dato.'; return; }
           m.textContent = '';
           renderRiepilogo(d);
         })
-        .catch(function (e) { m.className = 'err'; m.textContent = 'Errore di rete: ' + e.message; });
+        .catch(function (e) {
+          if (myReq !== riepReq) return;
+          m.className = 'err'; m.textContent = 'Errore di rete: ' + e.message;
+        });
     }
 
     function renderRiepilogo(d) {
