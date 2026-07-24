@@ -78,6 +78,13 @@
     .ovLbl { font-size:11px; font-weight:800; color:var(--muted); text-transform:uppercase; letter-spacing:.4px; }
     .ovVal { font-size:16px; font-weight:800; margin-top:4px; white-space:nowrap; }
     .ovVal.pos { color:#16a34a; } .ovVal.neg { color:#dc2626; }
+    .ovTable { width:100%; border-collapse:collapse; font-size:12px; }
+    .ovTable th, .ovTable td { padding:8px 3px; text-align:right; white-space:nowrap; }
+    .ovTable thead th { font-size:10px; font-weight:800; color:var(--muted); text-transform:uppercase; letter-spacing:.3px; }
+    .ovTable tbody th { text-align:left; font-weight:800; font-size:13px; padding-right:8px; }
+    .ovTable tbody tr + tr th, .ovTable tbody tr + tr td { border-top:1px solid var(--border); }
+    .ovTable tr.combo th, .ovTable tr.combo td { font-weight:800; }
+    .ovTable td.pos { color:#16a34a; } .ovTable td.neg { color:#dc2626; }
     .secTitle { font-size:12px; font-weight:800; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:12px; }
     .card + .card { margin-top:14px; }
     canvas { max-width:100%; }
@@ -178,11 +185,25 @@
     </div>
 
     <div class="card">
-      <div class="ovGrid">
-        <div class="ovCell"><div class="ovLbl">Entrate</div><div class="ovVal" id="ovEntrate">…</div></div>
-        <div class="ovCell"><div class="ovLbl">Uscite</div><div class="ovVal" id="ovUscite">…</div></div>
-        <div class="ovCell"><div class="ovLbl">Risparmio</div><div class="ovVal" id="ovRisparmio">…</div></div>
-      </div>
+      <table class="ovTable">
+        <thead>
+          <tr><th></th><th>Entrate</th><th>Uscite</th><th>Risparmio</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>Riccardo</th>
+            <td id="ovEntrRicc">…</td><td id="ovUscRicc">…</td><td id="ovRispRicc">…</td>
+          </tr>
+          <tr>
+            <th>Roberta</th>
+            <td id="ovEntrRob">…</td><td id="ovUscRob">…</td><td id="ovRispRob">…</td>
+          </tr>
+          <tr class="combo">
+            <th>Combo</th>
+            <td id="ovEntrTot">…</td><td id="ovUscTot">…</td><td id="ovRispTot">…</td>
+          </tr>
+        </tbody>
+      </table>
       <div class="donutRow">
         <div class="donutCell"><div class="donutTit">Roberta</div><canvas id="chDonutRob"></canvas><div class="donutVals" id="valsRob"></div></div>
         <div class="donutCell"><div class="donutTit">Riccardo</div><canvas id="chDonutRicc"></canvas><div class="donutVals" id="valsRicc"></div></div>
@@ -482,18 +503,30 @@
         (per.inizio ? per.inizio : '') + (per.fine ? ' → ' + per.fine : '');
 
       var ov = d.overview || { entrate: 0, uscite: 0, totale: 0 };
-      document.getElementById('ovEntrate').textContent = riepFmt(ov.entrate);
-      document.getElementById('ovUscite').textContent = riepFmt(ov.uscite);
-      var risp = document.getElementById('ovRisparmio');
-      risp.textContent = riepFmt(ov.totale);
-      risp.className = 'ovVal ' + (ov.totale < 0 ? 'neg' : 'pos');
+      var e = d.entrate || {}, s = d.risparmio || {};
+
+      // Tabella overview: Entrate / Uscite / Risparmio per Riccardo, Roberta, Combo.
+      // Uscite = entrate - risparmio (stessa logica delle barre).
+      function setCell(id, val, colora) {
+        var el = document.getElementById(id);
+        el.textContent = riepFmt(val);
+        el.className = colora ? (val < 0 ? 'neg' : 'pos') : '';
+      }
+      setCell('ovEntrRicc', e.riccardo || 0);
+      setCell('ovEntrRob', e.roberta || 0);
+      setCell('ovEntrTot', ov.entrate);
+      setCell('ovUscRicc', (e.riccardo || 0) - (s.riccardo || 0));
+      setCell('ovUscRob', (e.roberta || 0) - (s.roberta || 0));
+      setCell('ovUscTot', ov.uscite);
+      setCell('ovRispRicc', s.riccardo || 0, true);
+      setCell('ovRispRob', s.roberta || 0, true);
+      setCell('ovRispTot', ov.totale, true);
 
       var txt = chartTextColor(), grid = gridColor();
       Chart.defaults.color = txt;
       Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
 
       // --- Donut per persona: spese vs entrate (Roberta, Riccardo, Totale) ---
-      var e = d.entrate || {}, s = d.risparmio || {};
       function donut(id, valsId, spese, entrate) {
         destroyChart(id);
         charts[id] = new Chart(document.getElementById(id), {
@@ -534,7 +567,7 @@
           },
           scales: {
             x: { grid: { display: false } },
-            y: { grid: { color: grid }, ticks: { callback: function (v) { return riepSimbolo() + ' ' + v; } } }
+            y: { grid: { color: grid }, ticks: { callback: function (v) { return v; } } }
           }
         }
       });
@@ -562,7 +595,7 @@
             },
             scales: {
               x: { grid: { display: false }, ticks: { maxRotation: 90, minRotation: 45, font: { size: 9 } } },
-              y: { grid: { color: grid }, ticks: { callback: function (v) { return riepSimbolo() + ' ' + v; } } }
+              y: { grid: { color: grid }, ticks: { callback: function (v) { return v; } } }
             }
           }
         });
@@ -600,7 +633,7 @@
             tooltip: { callbacks: { label: function (c) { return c.dataset.label + ': ' + riepFmt(c.raw); } } }
           },
           scales: {
-            x: { grid: { color: grid }, ticks: { callback: function (v) { return riepSimbolo() + ' ' + v; } } },
+            x: { grid: { color: grid }, ticks: { callback: function (v) { return v; } } },
             y: { grid: { display: false }, ticks: { font: { size: 11 } } }
           }
         }
