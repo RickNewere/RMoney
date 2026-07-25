@@ -99,6 +99,16 @@
     .donutVals .dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:4px; vertical-align:middle; }
     .donutVals .dot.s { background:#ec4899; } .donutVals .dot.e { background:#16a34a; }
     #riepMsg { text-align:center; margin-top:14px; font-weight:700; min-height:22px; font-size:15px; }
+    #catChi { margin-bottom:16px; }
+    #catChi button { padding:9px 4px; font-size:14px; }
+    .catTable { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; }
+    .catTable td { padding:7px 2px; border-top:1px solid var(--border); vertical-align:middle; }
+    .catTable td.c { text-align:left; font-weight:600; }
+    .catTable td.v { text-align:right; font-weight:700; white-space:nowrap; }
+    .catTable td.p { text-align:right; color:var(--muted); width:38px; white-space:nowrap; }
+    .catTable .sub { display:block; font-size:10px; font-weight:500; color:var(--muted); margin-top:2px; }
+    .catTable tr.tot td { border-top:2px solid var(--border); font-weight:800; font-size:13px; }
+    .catEmpty { text-align:center; color:var(--muted); font-size:13px; padding:18px 0; }
   </style>
 </head>
 <body>
@@ -224,7 +234,13 @@
 
     <div class="card">
       <div class="secTitle">Spese per categoria</div>
+      <div class="seg" id="catChi">
+        <button data-v="Insieme" class="on">Insieme</button>
+        <button data-v="Riccardo">Riccardo</button>
+        <button data-v="Roberta">Roberta</button>
+      </div>
       <canvas id="chCat" height="420"></canvas>
+      <table class="catTable" id="catTable"></table>
     </div>
 
     <div id="riepMsg"></div>
@@ -419,6 +435,8 @@
     var riepP = 'Annuale', riepC = 'Euro';
     var charts = {}; // istanze Chart.js, per distruggerle prima di ricrearle
     var riepReq = 0; // token per ignorare risposte fuori ordine (race condition)
+    var riepData = null; // ultima risposta, per ridisegnare senza rifare la fetch
+    var catChi = 'Insieme'; // filtro persona della sezione "Spese per categoria"
 
     // Popola il selettore anno (dal 2024 all'anno corrente) e il mese corrente.
     (function initPeriodo() {
@@ -468,6 +486,7 @@
       caricaRiepilogo();
     });
     initSeg('riepValuta', function (v) { riepC = v; caricaRiepilogo(); });
+    initSeg('catChi', function (v) { catChi = v; renderCategorie(); });
     document.getElementById('riepAnno').addEventListener('change', caricaRiepilogo);
     document.getElementById('riepMese').addEventListener('change', caricaRiepilogo);
 
@@ -498,6 +517,7 @@
     }
 
     function renderRiepilogo(d) {
+      riepData = d;
       var per = d.periodo || {};
       document.getElementById('riepPeriodoLbl').textContent =
         (per.inizio ? per.inizio : '') + (per.fine ? ' → ' + per.fine : '');
@@ -604,40 +624,91 @@
         destroyChart('line');
       }
 
-      // --- Barre orizzontali: spese per categoria, Riccardo vs Roberta ---
-      var spR = (d.spese && d.spese.roberta) || [];
-      var spI = (d.spese && d.spese.riccardo) || [];
-      var cats = [];
-      spI.forEach(function (x) { if (cats.indexOf(x.categoria) < 0) cats.push(x.categoria); });
-      spR.forEach(function (x) { if (cats.indexOf(x.categoria) < 0) cats.push(x.categoria); });
+      renderCategorie();
+    }
+
+    // --- Spese per categoria, filtrabili per persona (Insieme/Riccardo/Roberta).
+    // Periodo e valuta arrivano dai selettori in cima; i dati sono gia' quelli
+    // dell'ultima risposta, quindi cambiare persona non rifa' la fetch.
+    function renderCategorie() {
+      if (!riepData) return;
+      var grid = gridColor();
+      var spR = (riepData.spese && riepData.spese.roberta) || [];
+      var spI = (riepData.spese && riepData.spese.riccardo) || [];
       function valFor(list, cat) {
         for (var i = 0; i < list.length; i++) if (list[i].categoria === cat) return list[i].importo;
         return 0;
       }
-      var dRicc = cats.map(function (c) { return valFor(spI, c); });
-      var dRob = cats.map(function (c) { return valFor(spR, c); });
+      // Unione delle categorie viste da entrambi, poi righe con i tre valori.
+      var nomi = [];
+      spI.forEach(function (x) { if (nomi.indexOf(x.categoria) < 0) nomi.push(x.categoria); });
+      spR.forEach(function (x) { if (nomi.indexOf(x.categoria) < 0) nomi.push(x.categoria); });
+      var righe = nomi.map(function (c) {
+        var ri = valFor(spI, c), ro = valFor(spR, c);
+        return { cat: c, ricc: ri, rob: ro, tot: ri + ro };
+      });
+      // Valore su cui filtrare/ordinare secondo la persona scelta.
+      function valore(r) {
+        return catChi === 'Riccardo' ? r.ricc : catChi === 'Roberta' ? r.rob : r.tot;
+      }
+      righe = righe.filter(function (r) { return Math.abs(valore(r)) > 0.005; });
+      righe.sort(function (a, b) { return valore(b) - valore(a); });
+
+      var tbl = document.getElementById('catTable');
+      var cv = document.getElementById('chCat');
       destroyChart('cat');
-      charts.cat = new Chart(document.getElementById('chCat'), {
+      if (!righe.length) {
+        cv.style.display = 'none';
+        tbl.innerHTML = '<tr><td class="catEmpty">Nessuna spesa in questo periodo.</td></tr>';
+        return;
+      }
+      cv.style.display = '';
+      // Altezza proporzionale al numero di categorie mostrate.
+      cv.height = Math.max(160, righe.length * 26 + 70);
+
+      var labels = righe.map(function (r) { return r.cat; });
+      var datasets = catChi === 'Riccardo'
+        ? [{ label: 'Riccardo', data: righe.map(function (r) { return r.ricc; }), backgroundColor: '#2563eb' }]
+        : catChi === 'Roberta'
+          ? [{ label: 'Roberta', data: righe.map(function (r) { return r.rob; }), backgroundColor: '#ec4899' }]
+          : [
+            { label: 'Riccardo', data: righe.map(function (r) { return r.ricc; }), backgroundColor: '#2563eb' },
+            { label: 'Roberta', data: righe.map(function (r) { return r.rob; }), backgroundColor: '#ec4899' }
+          ];
+      var insieme = catChi === 'Insieme';
+      charts.cat = new Chart(cv, {
         type: 'bar',
-        data: {
-          labels: cats,
-          datasets: [
-            { label: 'Riccardo', data: dRicc, backgroundColor: '#2563eb' },
-            { label: 'Roberta', data: dRob, backgroundColor: '#ec4899' }
-          ]
-        },
+        data: { labels: labels, datasets: datasets },
         options: {
           indexAxis: 'y',
           plugins: {
-            legend: { position: 'bottom' },
+            legend: { display: insieme, position: 'bottom' },
             tooltip: { callbacks: { label: function (c) { return c.dataset.label + ': ' + riepFmt(c.raw); } } }
           },
           scales: {
-            x: { grid: { color: grid }, ticks: { callback: function (v) { return v; } } },
-            y: { grid: { display: false }, ticks: { font: { size: 11 } } }
+            // Barre impilate: nella vista Insieme la lunghezza totale e' la somma dei due.
+            x: { stacked: insieme, grid: { color: grid }, ticks: { callback: function (v) { return v; } } },
+            y: { stacked: insieme, grid: { display: false }, ticks: { font: { size: 11 } } }
           }
         }
       });
+
+      // Dettaglio numerico sotto il grafico, con quota percentuale sul totale.
+      var totale = righe.reduce(function (s, r) { return s + valore(r); }, 0);
+      var html = '';
+      righe.forEach(function (r) {
+        var v = valore(r);
+        var pct = totale ? Math.round(v / totale * 100) : 0;
+        var sub = insieme
+          ? '<span class="sub">Riccardo ' + riepFmt(r.ricc) + ' · Roberta ' + riepFmt(r.rob) + '</span>'
+          : '';
+        html += '<tr><td class="c">' + r.cat + sub + '</td>'
+          + '<td class="v">' + riepFmt(v) + '</td>'
+          + '<td class="p">' + pct + '%</td></tr>';
+      });
+      html += '<tr class="tot"><td class="c">Totale</td>'
+        + '<td class="v">' + riepFmt(totale) + '</td><td class="p"></td></tr>';
+      tbl.innerHTML = html;
     }
   </script>
 </body>
