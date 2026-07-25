@@ -1,0 +1,677 @@
+/**
+ * RMoney - Backend (Google Apps Script)
+ * API leggera che l'app RMoney chiama per:
+ *   - leggere le categorie di un tab           GET  ?action=categorie&gid=...
+ *   - aggiungere una spesa in append           POST { gid, data, spesa, categoria, nota }
+ *
+ * Va creato dentro il foglio: Estensioni > Apps Script.
+ * Poi: Distribuisci > Nuova distribuzione > Applicazione web.
+ */
+
+// ID del foglio (sta nell'URL tra /d/ e /edit)
+var SPREADSHEET_ID = '10NT_nAkXRX12sEzFdpa6khSnONfjwm-NHGguoDm215U';
+
+// gid del foglio nascosto con le pivot sorgente (andamento risparmio mensile).
+var GID_PIVOT = 1943088578;
+
+// Le 15 categorie di SPESA (come nelle tabelle SPESE dei fogli SOMMARIO), in
+// minuscolo. Tutto cio' che non e' spesa e non e' "storni/rimborsi" e' entrata.
+var SPESE_CATS = ['spesa', 'meeve e kimi', 'trasporti', 'casa', 'affitto',
+  'bollette', 'uscite', 'abbigliamento', 'spese mediche', 'palestra',
+  'vacanze', 'abbonamenti', 'extra', 'investimenti', 'tasse'];
+// Nomi visualizzati delle categorie di spesa, nell'ordine dei fogli.
+var SPESE_CATS_LABEL = ['Spesa', 'Meeve e Kimi', 'Trasporti', 'Casa', 'Affitto',
+  'Bollette', 'Uscite', 'Abbigliamento', 'Spese Mediche', 'Palestra',
+  'Vacanze', 'Abbonamenti', 'Extra', 'Investimenti', 'Tasse'];
+
+// gid dei fogli LOG (le stesse schede su cui si inseriscono le spese).
+var LOG_GIDS = {
+  Euro:    { Roberta: 1888286288, Riccardo: 113020932 },
+  Franchi: { Roberta: 1063479927, Riccardo: 650699013 }
+};
+
+// Marcatore di versione: serve per verificare cosa e' effettivamente online.
+var VERSION = 'v14';
+
+// ---------- Router ----------
+function doGet(e) {
+  var action = (e && e.parameter && e.parameter.action) || '';
+  if (action === 'categorie') {
+    var gid = parseInt(e.parameter.gid, 10);
+    return _json({ ok: true, version: VERSION, categorie: getCategorie(gid) });
+  }
+  if (action === 'catdebug') {
+    var gidC = parseInt(e.parameter.gid, 10);
+    return _json({ ok: true, version: VERSION, dettaglio: _categorieDettaglio(gidC) });
+  }
+  if (action === 'debug') {
+    var gid2 = parseInt(e.parameter.gid, 10);
+    var sh = _getSheetByGid(gid2);
+    var nRows = Math.min(sh.getLastRow(), 4);
+    var nCols = Math.max(sh.getLastColumn(), 1);
+    var prime = nRows > 0 ? sh.getRange(1, 1, nRows, nCols).getValues() : [];
+    var ultima = sh.getLastRow() > 0
+      ? sh.getRange(sh.getLastRow(), 1, 1, nCols).getDisplayValues()[0]
+      : [];
+    return _json({
+      ok: true,
+      version: VERSION,
+      nomeTab: sh.getName(),
+      righe: sh.getLastRow(),
+      colonne: nCols,
+      primeRighe: prime,
+      ultimaRigaVisuale: ultima
+    });
+  }
+  if (action === 'debito') {
+    var gidD = parseInt(e.parameter.gid, 10);
+    var gidP = e.parameter.gidPartner ? parseInt(e.parameter.gidPartner, 10) : null;
+    return _json({ ok: true, version: VERSION, debito: getDebito(gidD, gidP) });
+  }
+  if (action === 'riepilogo') {
+    var gidS = parseInt(e.parameter.gid, 10);
+    return _json({ ok: true, version: VERSION, riepilogo: getRiepilogo(gidS) });
+  }
+  // Riepilogo per periodo scelto, ricalcolato dai fogli LOG.
+  if (action === 'riep') {
+    var conto = e.parameter.conto || 'Euro';
+    var tipo = e.parameter.tipo || 'annuale';
+    var oggi = new Date();
+    var anno = parseInt(e.parameter.anno, 10) || oggi.getFullYear();
+    var mese = parseInt(e.parameter.mese, 10) || (oggi.getMonth() + 1);
+    return _json({ ok: true, version: VERSION, riepilogo: getRiepCalc(conto, tipo, anno, mese) });
+  }
+  // TEMP: valida il ricalcolo dai LOG contro i numeri dei fogli SOMMARIO.
+  if (action === 'riepvalida') {
+    var calc = getRiepCalc('Euro', 'annuale', 2025, 1);
+    var som = getRiepilogo(738641296);
+    var rob = _riepAggPersona(LOG_GIDS.Euro.Roberta, new Date(2025, 0, 1), new Date(2026, 0, 1));
+    var ric = _riepAggPersona(LOG_GIDS.Euro.Riccardo, new Date(2025, 0, 1), new Date(2026, 0, 1));
+    return _json({
+      ok: true, version: VERSION,
+      calc: { overview: calc.overview, entrate: calc.entrate, risparmio: calc.risparmio, spese: calc.spese },
+      som:  { overview: som.overview,  entrate: som.entrate,  risparmio: som.risparmio,  spese: som.spese },
+      entByCat: { roberta: rob.entByCat, riccardo: ric.entByCat }
+    });
+  }
+  // Nessun parametro action: l'app web e' servita da GitHub Pages. Qui
+  // rispondiamo solo con un piccolo JSON informativo (nessun file HTML lato
+  // Apps Script, per evitare l'errore "No HTML file named App").
+  return _json({ ok: true, version: VERSION, hint: 'Usa ?action=categorie|debito|debug, oppure POST per aggiungere/saldare.' });
+}
+
+function doPost(e) {
+  try {
+    var body = JSON.parse(e.postData.contents);
+    if (body.op === 'salda') {
+      var res = saldaFoglio(parseInt(body.gid, 10));
+      return _json({ ok: true, azzerate: res.azzerate });
+    }
+    aggiungiSpesa(body);
+    return _json({ ok: true });
+  } catch (err) {
+    return _json({ ok: false, error: String((err && err.message) || err) });
+  }
+}
+
+function _json(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ---------- Helpers ----------
+function _ss() {
+  return SpreadsheetApp.openById(SPREADSHEET_ID);
+}
+
+function _getSheetByGid(gid) {
+  var sheets = _ss().getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].getSheetId() === gid) return sheets[i];
+  }
+  throw new Error('Tab con gid ' + gid + ' non trovato.');
+}
+
+// Trova automaticamente la riga delle intestazioni (puo' non essere la 1a
+// perche' spesso la riga 1 e' un titolo). Restituisce riga (1-based),
+// intestazioni in minuscolo e numero di colonne.
+function _findHeader(sheet) {
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
+  var maxScan = Math.min(Math.max(sheet.getLastRow(), 1), 8);
+  var block = sheet.getRange(1, 1, maxScan, lastCol).getValues();
+  var kw = ['data', 'categor', 'dettagl', 'importo', 'spesa', 'euro',
+            'costo', '€', 'chf', 'franc', 'note', 'nota', 'descriz'];
+  var best = -1, bestRow = 1, bestHeaders = block[0]
+    .map(function (h) { return String(h).toLowerCase().trim(); });
+  for (var r = 0; r < block.length; r++) {
+    var row = block[r].map(function (h) { return String(h).toLowerCase().trim(); });
+    var score = 0;
+    row.forEach(function (cell) {
+      if (!cell) return;
+      kw.forEach(function (k) { if (cell.indexOf(k) !== -1) score++; });
+    });
+    if (score > best) { best = score; bestRow = r + 1; bestHeaders = row; }
+  }
+  return { row: bestRow, headers: bestHeaders, lastCol: lastCol };
+}
+
+function _colFor(headers, possibili) {
+  for (var i = 0; i < headers.length; i++) {
+    for (var j = 0; j < possibili.length; j++) {
+      if (headers[i].indexOf(possibili[j]) !== -1) return i; // 0-based
+    }
+  }
+  return -1;
+}
+
+function _pulisci(arr) {
+  var seen = {}, out = [];
+  arr.forEach(function (v) {
+    var s = String(v).trim();
+    if (s && !seen[s.toLowerCase()]) { seen[s.toLowerCase()] = true; out.push(s); }
+  });
+  return out;
+}
+
+// ---------- Categorie (lette dal foglio) ----------
+// Usa le categorie REALMENTE usate nella colonna (i valori distinti).
+function getCategorie(gid) {
+  var d = _categorieDettaglio(gid);
+  return d.usate;
+}
+
+// Restituisce sia i valori usati nella colonna sia l'eventuale lista del
+// menu a tendina, per capire cosa c'e' nel foglio.
+function _categorieDettaglio(gid) {
+  var sheet = _getSheetByGid(gid);
+  var h = _findHeader(sheet);
+  var idxCat = _colFor(h.headers, ['categor']);
+  if (idxCat < 0) return { usate: [], menuTendina: [], headerRow: h.row };
+  var col = idxCat + 1;
+  var firstDataRow = h.row + 1;
+
+  // valori realmente presenti nella colonna
+  var usate = [];
+  var last = sheet.getLastRow();
+  if (last >= firstDataRow) {
+    var vals = sheet.getRange(firstDataRow, col, last - firstDataRow + 1, 1).getValues()
+      .map(function (r) { return r[0]; });
+    usate = _pulisci(vals);
+    usate.sort(function (a, b) { return a.localeCompare(b); });
+  }
+
+  // eventuale lista del menu a tendina (convalida dati) sulla 1a cella dati
+  var menu = [];
+  var rule = sheet.getRange(firstDataRow, col).getDataValidation();
+  if (rule) {
+    var crit = String(rule.getCriteriaType());
+    var args = rule.getCriteriaValues();
+    if (crit.indexOf('VALUE_IN_LIST') !== -1 && Array.isArray(args[0])) {
+      menu = _pulisci(args[0]);
+    } else if (crit.indexOf('VALUE_IN_RANGE') !== -1 && args[0]) {
+      menu = _pulisci(args[0].getValues().map(function (r) { return r[0]; }));
+    }
+  }
+
+  return { usate: usate, menuTendina: menu, headerRow: h.row };
+}
+
+// ---------- Append spesa ----------
+function aggiungiSpesa(dati) {
+  var gid = parseInt(dati.gid, 10);
+  var sheet = _getSheetByGid(gid);
+  var h = _findHeader(sheet);
+  var headers = h.headers;
+  var lastCol = h.lastCol;
+
+  var idxData  = _colFor(headers, ['data']);
+  var idxSpesa = _colFor(headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
+  var idxCat   = _colFor(headers, ['categor']);
+  var idxNota  = _colFor(headers, ['dettagl', 'nota', 'note', 'descriz']);
+
+  // se l'importo non ha un'intestazione riconosciuta, sta subito dopo la data
+  if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
+
+  var dataVal = dati.data ? new Date(dati.data + 'T12:00:00') : new Date();
+  var spesaVal = parseFloat(String(dati.spesa).replace(',', '.'));
+  if (isNaN(spesaVal)) throw new Error('Importo non valido.');
+
+  var riga = new Array(lastCol).fill('');
+  if (idxData  >= 0) riga[idxData]  = dataVal;
+  if (idxSpesa >= 0) riga[idxSpesa] = spesaVal;
+  if (idxCat   >= 0) riga[idxCat]   = dati.categoria || '';
+  if (idxNota  >= 0) riga[idxNota]  = dati.nota || '';
+
+  // se non trova nessuna intestazione, usa l'ordine: Data, Importo, Categoria, Nota
+  if (idxData < 0 && idxSpesa < 0 && idxCat < 0 && idxNota < 0) {
+    riga = [dataVal, spesaVal, dati.categoria || '', dati.nota || ''];
+    idxData = 0;
+    idxNota = 3;
+  }
+
+  // Spesa condivisa: la casella "split" va gestita DOPO appendRow, perche' se
+  // la cella non ha la data validation da checkbox, scrivere true la mostra
+  // come testo "true". Qui prepariamo solo il fallback "-" (colonna assente).
+  var idxSplit = _colFor(headers, ['split']);
+  if (dati.segno && idxSplit < 0 && idxNota >= 0) {
+    var cDx = idxNota + 1;
+    while (riga.length <= cDx) riga.push('');
+    riga[cDx] = '-';
+  }
+
+  sheet.appendRow(riga);
+  var r = sheet.getLastRow();
+
+  // Formatta la data come "giorno mese anno" (es. 20 lug 2026), senza orario.
+  if (idxData >= 0) {
+    sheet.getRange(r, idxData + 1).setNumberFormat('d mmm yyyy');
+  }
+
+  // Se condivisa e la colonna "split" esiste: inserisci la checkbox sulla cella
+  // e poi spuntala. insertCheckboxes() imposta la data validation (e mette il
+  // valore a false), quindi il setValue(true) successivo la lascia spuntata.
+  if (dati.segno && idxSplit >= 0) {
+    var cell = sheet.getRange(r, idxSplit + 1);
+    cell.insertCheckboxes();
+    cell.setValue(true);
+  }
+}
+
+// ---------- Debito condiviso (righe col trattino) ----------
+// SOLO LETTURA: queste funzioni non scrivono, non cancellano e non formattano
+// nulla sul foglio. Usano esclusivamente getRange(...).getValues().
+//
+// Una riga e' "condivisa" (spesa da dividere a meta') se la casella "split" e'
+// spuntata (true) oppure contiene il vecchio marcatore "-". Se la colonna
+// "split" non esiste ancora, si ripiega sul vecchio metodo: qualsiasi "-" da
+// destra della nota in poi.
+function _isCondivisa(row, idxSplit, idxNota, lastCol) {
+  if (idxSplit >= 0) {
+    var s = row[idxSplit];
+    return (s === true || String(s).trim() === '-');
+  }
+  for (var c = idxNota + 1; c < lastCol; c++) {
+    if (String(row[c]).trim() === '-') return true;
+  }
+  return false;
+}
+
+function _totaleCondivise(gid) {
+  var sheet = _getSheetByGid(gid);
+  var h = _findHeader(sheet);
+  var headers = h.headers;
+  var lastCol = h.lastCol;
+
+  var idxData  = _colFor(headers, ['data']);
+  var idxSpesa = _colFor(headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
+  var idxNota  = _colFor(headers, ['dettagl', 'nota', 'note', 'descriz']);
+  var idxSplit = _colFor(headers, ['split']);
+  if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
+  if (idxSpesa < 0 || idxNota < 0) return { totale: 0, meta: 0, conteggio: 0 };
+
+  var firstData = h.row + 1;
+  var last = sheet.getLastRow();
+  if (last < firstData) return { totale: 0, meta: 0, conteggio: 0 };
+
+  var vals = sheet.getRange(firstData, 1, last - firstData + 1, lastCol).getValues();
+  var tot = 0, cnt = 0;
+  for (var i = 0; i < vals.length; i++) {
+    var row = vals[i];
+    if (!_isCondivisa(row, idxSplit, idxNota, lastCol)) continue;
+    var v = row[idxSpesa];
+    var n = (typeof v === 'number')
+      ? v
+      : parseFloat(String(v).replace(/[^0-9,.\-]/g, '').replace(',', '.'));
+    if (!isNaN(n)) { tot += Math.abs(n); cnt++; }
+  }
+  return { totale: tot, meta: tot / 2, conteggio: cnt };
+}
+
+// Compone il debito del foglio selezionato e (se passato) del foglio partner
+// della stessa valuta. netto = meta(mio) - meta(partner):
+//   > 0  -> la persona del foglio partner deve alla persona del foglio "mio"
+//   < 0  -> viceversa
+function getDebito(gid, gidPartner) {
+  var mio = _totaleCondivise(gid);
+  var partner = (gidPartner != null && !isNaN(gidPartner))
+    ? _totaleCondivise(gidPartner)
+    : { totale: 0, meta: 0, conteggio: 0 };
+  return { mio: mio, partner: partner, netto: mio.meta - partner.meta };
+}
+
+// ---------- Riepilogo (sola lettura) ----------
+// Legge un foglio SOMMARIO (ANNUALE/MENSILE, euro o CHF) e ne estrae:
+//   - overview: entrate, uscite, totale, e il periodo (data inizio/fine)
+//   - entrate e risparmio per persona (Roberta/Riccardo/Totale)
+//   - spese per categoria, separate per persona
+//   - andamento: solo per i fogli ANNUALE, serie mensile del risparmio letta
+//     dal foglio pivot nascosto (GID_PIVOT).
+// Non scrive nulla: usa solo getValues/getDisplayValues.
+function getRiepilogo(gid) {
+  var sheet = _getSheetByGid(gid);
+  var name = sheet.getName();
+  var valuta = /CHF/i.test(name) ? 'CHF' : '€';
+
+  var lastR = Math.max(sheet.getLastRow(), 1);
+  var lastC = Math.max(sheet.getLastColumn(), 1);
+  var rng = sheet.getRange(1, 1, lastR, lastC);
+  var vals = rng.getValues();
+  var disp = rng.getDisplayValues();
+
+  var out = {
+    nome: name,
+    valuta: valuta,
+    tipo: /ANNUALE/i.test(name) ? 'annuale' : 'mensile',
+    periodo: _riepPeriodo(vals, disp),
+    overview: _riepOverview(vals),
+    entrate: _riepPersone(vals, 'ENTRATE'),
+    risparmio: _riepPersone(vals, 'RISPARMIO'),
+    spese: {
+      roberta: _riepCategorie(vals, 'SPESE ROBERTA'),
+      riccardo: _riepCategorie(vals, 'SPESE RICCARDO')
+    }
+  };
+  if (/ANNUALE/i.test(name)) out.andamento = _riepAndamento(valuta);
+  return out;
+}
+
+// Numero robusto: getValues restituisce gia' numeri (il "-" contabile e' 0).
+function _riepNum(v) {
+  if (typeof v === 'number') return v;
+  if (v === '' || v == null) return 0;
+  var s = String(v).replace(/€|chf/gi, '').trim();
+  if (!/\d/.test(s)) return 0;
+  var fd = s.search(/\d/);
+  var neg = s.slice(0, fd).indexOf('-') !== -1;
+  var n = parseFloat(s.slice(fd).replace(/\./g, '').replace(',', '.').replace(/[^\d.]/g, ''));
+  if (isNaN(n)) return 0;
+  return neg ? -n : n;
+}
+
+// Trova la prima cella il cui testo (trim) e' esattamente uguale a "text".
+function _riepFind(vals, text) {
+  for (var r = 0; r < vals.length; r++) {
+    for (var c = 0; c < vals[r].length; c++) {
+      if (String(vals[r][c]).trim() === text) return { r: r, c: c };
+    }
+  }
+  return null;
+}
+
+function _riepPeriodo(vals, disp) {
+  var a = _riepFind(vals, 'OVERVIEW');
+  if (!a) return { inizio: '', fine: '' };
+  var inizio = '', fine = '';
+  for (var r = a.r + 1; r < Math.min(a.r + 8, vals.length); r++) {
+    var lbl = String(vals[r][a.c]).trim().toLowerCase();
+    if (lbl === 'data inizio') inizio = disp[r][a.c + 1];
+    if (lbl === 'data fine') fine = disp[r][a.c + 1];
+  }
+  return { inizio: inizio, fine: fine };
+}
+
+function _riepOverview(vals) {
+  var a = _riepFind(vals, 'OVERVIEW');
+  var o = { entrate: 0, uscite: 0, totale: 0 };
+  if (!a) return o;
+  for (var r = a.r + 1; r < Math.min(a.r + 8, vals.length); r++) {
+    var lbl = String(vals[r][a.c]).trim().toLowerCase();
+    var val = _riepNum(vals[r][a.c + 1]);
+    if (lbl === 'entrate') o.entrate = val;
+    if (lbl === 'uscite') o.uscite = val;
+    if (lbl === 'totale') o.totale = val;
+  }
+  return o;
+}
+
+// Tabella con righe Roberta/Riccardo/Totale sotto un'intestazione (ENTRATE/RISPARMIO).
+function _riepPersone(vals, anchor) {
+  var a = _riepFind(vals, anchor);
+  var o = { roberta: 0, riccardo: 0, totale: 0 };
+  if (!a) return o;
+  for (var r = a.r + 1; r < Math.min(a.r + 8, vals.length); r++) {
+    var lbl = String(vals[r][a.c]).trim().toLowerCase();
+    var val = _riepNum(vals[r][a.c + 1]);
+    if (lbl === 'roberta') o.roberta = val;
+    else if (lbl === 'riccardo') o.riccardo = val;
+    else if (lbl === 'totale') { o.totale = val; break; }
+  }
+  return o;
+}
+
+// Tabella categoria->importo sotto "SPESE ROBERTA"/"SPESE RICCARDO".
+// Categoria nella colonna dell'ancora, importo nella colonna a destra.
+// Si ferma alla riga "Totale".
+function _riepCategorie(vals, anchor) {
+  var a = _riepFind(vals, anchor);
+  var lista = [];
+  if (!a) return lista;
+  for (var r = a.r + 1; r < vals.length; r++) {
+    var lbl = String(vals[r][a.c]).trim();
+    if (!lbl) continue;
+    if (lbl.toLowerCase() === 'totale') break;
+    lista.push({ categoria: lbl, importo: _riepNum(vals[r][a.c + 1]) });
+  }
+  return lista;
+}
+
+// Andamento risparmio mensile dal foglio pivot nascosto.
+// Le intestazioni mese stanno su una riga (token tipo "AUG 24"/"SEP24"); sotto,
+// tre righe Roberta/Riccardo/Totale. La prima tabella e' in euro, la seconda CHF.
+function _riepAndamento(valuta) {
+  var sh = _getSheetByGid(GID_PIVOT);
+  var v = sh.getRange(1, 1, Math.max(sh.getLastRow(), 1), Math.max(sh.getLastColumn(), 1)).getValues();
+  var headerRows = [];
+  var mese = /^[A-Z]{3}\s?\d{2}$/i;
+  for (var r = 0; r < v.length; r++) {
+    if (mese.test(String(v[r][2]).trim())) headerRows.push(r);
+  }
+  var hr = (valuta === 'CHF') ? headerRows[1] : headerRows[0];
+  if (hr == null) return null;
+
+  var mesi = [], cols = [];
+  for (var c = 2; c < v[hr].length; c++) {
+    var m = String(v[hr][c]).trim();
+    if (!m) break;
+    mesi.push(m); cols.push(c);
+  }
+  function serie(label) {
+    for (var r = hr + 1; r < Math.min(hr + 5, v.length); r++) {
+      if (String(v[r][1]).trim().toLowerCase() === label) {
+        return cols.map(function (c) { return _riepNum(v[r][c]); });
+      }
+    }
+    return [];
+  }
+  return { mesi: mesi, roberta: serie('roberta'), riccardo: serie('riccardo'), totale: serie('totale') };
+}
+
+// ---------- Riepilogo per periodo (ricalcolato dai LOG, sola lettura) ----------
+// Legge i due fogli LOG della valuta scelta e aggrega su un periodo arbitrario
+// (un mese o un anno), replicando la logica dei fogli SOMMARIO:
+//   entrata  = riga la cui categoria NON e' di spesa e NON e' storni/rimborsi
+//   spesa    = riga con categoria tra le 15 di SPESE_CATS
+//   storni   = escluso da entrate e spese
+//   risparmio = entrate - spese
+function _fmtDate(d) {
+  var p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return p(d.getDate()) + '/' + p(d.getMonth() + 1) + '/' + d.getFullYear();
+}
+
+// Righe di un LOG normalizzate: { date:Date, amount:Number, cat:String }.
+function _riepLogRows(gid) {
+  var sheet = _getSheetByGid(gid);
+  var h = _findHeader(sheet);
+  var headers = h.headers, lastCol = h.lastCol;
+  var idxData = _colFor(headers, ['data']);
+  var idxImp = _colFor(headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
+  var idxCat = _colFor(headers, ['categor']);
+  if (idxImp < 0 && idxData >= 0) idxImp = idxData + 1;
+  if (idxData < 0 || idxCat < 0) return [];
+  var first = h.row + 1, last = sheet.getLastRow();
+  if (last < first) return [];
+  var vals = sheet.getRange(first, 1, last - first + 1, lastCol).getValues();
+  var out = [];
+  for (var i = 0; i < vals.length; i++) {
+    var d = vals[i][idxData];
+    if (!(d instanceof Date)) {
+      if (!d) continue;
+      d = new Date(d);
+      if (isNaN(d.getTime())) continue;
+    }
+    var cat = String(vals[i][idxCat]).trim();
+    if (!cat) continue;
+    var amt = vals[i][idxImp];
+    amt = (typeof amt === 'number') ? amt : _riepNum(amt);
+    out.push({ date: d, amount: Math.abs(amt), cat: cat });
+  }
+  return out;
+}
+
+// true se la categoria e' una delle 15 di spesa. Tutto il resto (stipendi,
+// tredicesime, storni e rimborsi) conta come entrata, come sui fogli SOMMARIO.
+function _isSpesa(cat) {
+  return SPESE_CATS.indexOf(cat.toLowerCase()) !== -1;
+}
+
+// Aggrega un LOG su [start, end): entrate, spese, risparmio, spese per categoria.
+function _riepAggPersona(gid, start, end) {
+  var rows = _riepLogRows(gid);
+  var entrate = 0, spese = 0, byCat = {}, entByCat = {};
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (r.date < start || r.date >= end) continue;
+    var lc = r.cat.toLowerCase();
+    if (_isSpesa(r.cat)) { spese += r.amount; byCat[lc] = (byCat[lc] || 0) + r.amount; }
+    else { entrate += r.amount; entByCat[r.cat] = (entByCat[r.cat] || 0) + r.amount; }
+  }
+  return { entrate: entrate, spese: spese, risparmio: entrate - spese, byCat: byCat, entByCat: entByCat };
+}
+
+// Risparmio (entrate - spese) di un set di righe gia' lette, su [start, end).
+function _risparmioPeriodo(rows, start, end) {
+  var entrate = 0, spese = 0;
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (r.date < start || r.date >= end) continue;
+    if (_isSpesa(r.cat)) spese += r.amount; else entrate += r.amount;
+  }
+  return entrate - spese;
+}
+
+// Andamento risparmio: 12 mesi dell'anno scelto, per persona + totale.
+function _riepAndamentoCalc(gids, anno) {
+  var rowsR = _riepLogRows(gids.Roberta), rowsI = _riepLogRows(gids.Riccardo);
+  var nomi = ['GEN', 'FEB', 'MAR', 'APR', 'MAG', 'GIU', 'LUG', 'AGO', 'SET', 'OTT', 'NOV', 'DIC'];
+  var mesi = [], rob = [], ricc = [], tot = [];
+  for (var m = 0; m < 12; m++) {
+    var s = new Date(anno, m, 1), e = new Date(anno, m + 1, 1);
+    var rr = _risparmioPeriodo(rowsR, s, e), ri = _risparmioPeriodo(rowsI, s, e);
+    mesi.push(nomi[m] + ' ' + String(anno).slice(2));
+    rob.push(rr); ricc.push(ri); tot.push(rr + ri);
+  }
+  return { mesi: mesi, roberta: rob, riccardo: ricc, totale: tot };
+}
+
+function getRiepCalc(conto, tipo, anno, mese) {
+  var gids = LOG_GIDS[conto] || LOG_GIDS.Euro;
+  var valuta = conto === 'Franchi' ? 'CHF' : '€';
+  var start, end;
+  if (tipo === 'mensile') { start = new Date(anno, mese - 1, 1); end = new Date(anno, mese, 1); }
+  else { start = new Date(anno, 0, 1); end = new Date(anno + 1, 0, 1); }
+
+  var rob = _riepAggPersona(gids.Roberta, start, end);
+  var ricc = _riepAggPersona(gids.Riccardo, start, end);
+
+  function listaCat(byCat) {
+    return SPESE_CATS_LABEL.map(function (lbl, i) {
+      return { categoria: lbl, importo: byCat[SPESE_CATS[i]] || 0 };
+    });
+  }
+
+  var out = {
+    valuta: valuta,
+    tipo: tipo === 'mensile' ? 'mensile' : 'annuale',
+    anno: anno,
+    mese: tipo === 'mensile' ? mese : null,
+    periodo: { inizio: _fmtDate(start), fine: _fmtDate(new Date(end.getTime() - 86400000)) },
+    overview: {
+      entrate: rob.entrate + ricc.entrate,
+      uscite: rob.spese + ricc.spese,
+      totale: (rob.entrate + ricc.entrate) - (rob.spese + ricc.spese)
+    },
+    entrate: { roberta: rob.entrate, riccardo: ricc.entrate, totale: rob.entrate + ricc.entrate },
+    risparmio: { roberta: rob.risparmio, riccardo: ricc.risparmio, totale: rob.risparmio + ricc.risparmio },
+    spese: { roberta: listaCat(rob.byCat), riccardo: listaCat(ricc.byCat) }
+  };
+  if (tipo !== 'mensile') out.andamento = _riepAndamentoCalc(gids, anno);
+  return out;
+}
+
+// ---------- Salda: azzera le spunte "split" di UN foglio ----------
+// SCRITTURA LIMITATA: tocca esclusivamente la colonna "split". Non modifica
+// date, importi, categorie, note o altre colonne. Le spese restano; vengono
+// solo tolte le spunte di condivisione.
+function saldaFoglio(gid) {
+  var sheet = _getSheetByGid(gid);
+  var h = _findHeader(sheet);
+  var idxSplit = _colFor(h.headers, ['split']);
+  if (idxSplit < 0) throw new Error('Colonna "split" non trovata: esegui prima setupSplitColumn().');
+
+  var firstData = h.row + 1;
+  var last = sheet.getLastRow();
+  if (last < firstData) return { azzerate: 0 };
+
+  var col = idxSplit + 1; // 1-based
+  var rng = sheet.getRange(firstData, col, last - firstData + 1, 1);
+  var vals = rng.getValues();
+  var out = [], n = 0;
+  for (var i = 0; i < vals.length; i++) {
+    var v = vals[i][0];
+    if (v === true || String(v).trim() === '-') n++;
+    out.push([false]);
+  }
+  rng.setValues(out);      // un'unica scrittura, solo la colonna split
+  rng.insertCheckboxes();  // garantisce la checkbox (niente testo "false")
+  return { azzerate: n };
+}
+
+// ---------- Setup una-tantum: crea la colonna "split" con checkbox ----------
+// Da lanciare UNA volta dall'editor Apps Script (Esegui > setupSplitColumn).
+// Per i 4 fogli noti mette l'intestazione "split" nella colonna a destra di
+// DETTAGLI, converte i "-" gia' presenti in spunta (true) e applica la
+// checkbox. Tocca solo l'intestazione e quella singola colonna.
+function setupSplitColumn() {
+  var GIDS = [113020932, 1888286288, 650699013, 1063479927];
+  var report = [];
+  for (var g = 0; g < GIDS.length; g++) {
+    var sheet = _getSheetByGid(GIDS[g]);
+    var h = _findHeader(sheet);
+    var idxNota = _colFor(h.headers, ['dettagl', 'nota', 'note', 'descriz']);
+    if (idxNota < 0) { report.push(sheet.getName() + ': colonna nota non trovata, SALTATO'); continue; }
+    var splitCol = idxNota + 2; // 1-based: colonna subito a destra della nota
+
+    sheet.getRange(h.row, splitCol).setValue('split'); // intestazione
+
+    var firstData = h.row + 1;
+    var last = sheet.getLastRow();
+    var convertiti = 0;
+    if (last >= firstData) {
+      var rng = sheet.getRange(firstData, splitCol, last - firstData + 1, 1);
+      var vals = rng.getValues();
+      var out = [];
+      for (var i = 0; i < vals.length; i++) {
+        var v = vals[i][0];
+        var checked = (v === true || String(v).trim() === '-');
+        if (checked) convertiti++;
+        out.push([checked]);
+      }
+      rng.setValues(out);
+      rng.insertCheckboxes();
+    }
+    report.push(sheet.getName() + ': colonna ' + splitCol + ', spunte convertite ' + convertiti);
+  }
+  Logger.log(report.join('\n'));
+  return report;
+}
