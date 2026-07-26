@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v14';
+var VERSION = 'v15';
 
 // ---------- Router ----------
 function doGet(e) {
@@ -263,18 +263,34 @@ function aggiungiSpesa(dati) {
   sheet.appendRow(riga);
   var r = sheet.getLastRow();
 
+  // La riga nuova deve essere identica alle precedenti. appendRow non applica
+  // formati: eredita solo quelli gia' presenti nella riga di destinazione.
+  // I fogli hanno il formato contabile (" € 9,50 ") applicato a un intervallo
+  // finito, quindi quando i dati lo superano le nuove righe nascono senza
+  // formato e l'importo appare come "1" invece di " € 1,00 " (successo davvero
+  // su LOG RICCARDO alla riga 770). Copiamo il formato dalla riga precedente.
+  var prev = r - 1;
+  if (prev > h.row) {
+    sheet.getRange(prev, 1, 1, lastCol).copyTo(
+      sheet.getRange(r, 1, 1, lastCol),
+      SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
+      false
+    );
+  }
+
   // Formatta la data come "giorno mese anno" (es. 20 lug 2026), senza orario.
   if (idxData >= 0) {
     sheet.getRange(r, idxData + 1).setNumberFormat('d mmm yyyy');
   }
 
-  // Se condivisa e la colonna "split" esiste: inserisci la checkbox sulla cella
-  // e poi spuntala. insertCheckboxes() imposta la data validation (e mette il
-  // valore a false), quindi il setValue(true) successivo la lascia spuntata.
-  if (dati.segno && idxSplit >= 0) {
+  // La cella "split" deve sempre avere una checkbox vera, come tutte le altre
+  // righe: insertCheckboxes() imposta la data validation e mette il valore a
+  // false, quindi il setValue(true) successivo la lascia spuntata. Senza questo,
+  // una riga non condivisa restava una cella vuota senza casella.
+  if (idxSplit >= 0) {
     var cell = sheet.getRange(r, idxSplit + 1);
     cell.insertCheckboxes();
-    cell.setValue(true);
+    if (dati.segno) cell.setValue(true);
   }
 }
 
