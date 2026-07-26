@@ -284,7 +284,9 @@
 
     function caricaCategorie() {
       var sel = document.getElementById('categoria');
-      sel.innerHTML = '<option>Caricamento…</option>';
+      // value="" cosi' un invio prima del caricamento non scrive la stringa
+      // "Caricamento…" come categoria nel foglio.
+      sel.innerHTML = '<option value="">Caricamento…</option>';
       fetch(API + '?action=categorie&gid=' + gid())
         .then(function (r) { return r.json(); })
         .then(function (j) {
@@ -393,6 +395,11 @@
       if (!spesa) { msg.className = 'err'; msg.textContent = 'Inserisci un importo.'; return; }
       if (isNaN(parseFloat(spesa.replace(',', '.')))) {
         msg.className = 'err'; msg.textContent = 'Importo non valido.'; return;
+      }
+      // Le categorie arrivano da Apps Script e possono metterci diversi secondi:
+      // senza questo controllo un invio anticipato scriveva una categoria vuota.
+      if (!document.getElementById('categoria').value) {
+        msg.className = 'err'; msg.textContent = 'Attendi il caricamento delle categorie.'; return;
       }
 
       var dati = {
