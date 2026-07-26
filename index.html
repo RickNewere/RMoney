@@ -302,35 +302,50 @@
     }
     caricaCategorie();
 
-    // ---- Debito condiviso (righe col trattino) ----
-    function altraPersona() { return persona === 'Riccardo' ? 'Roberta' : 'Riccardo'; }
-    function partnerGid() { return TABS[altraPersona()][conto]; }
-    function simbolo() { return conto === 'Euro' ? '€' : 'CHF'; }
-    function fmtImporto(n) {
-      return simbolo() + ' ' + (Math.round(n * 100) / 100).toFixed(2).replace('.', ',');
-    }
+    // ---- Debito condiviso (righe con la spunta split) ----
+    // Nessun helper che legga persona/conto globali: il rendering deve usare
+    // solo la fotografia presa quando la richiesta e' partita (vedi caricaDebito).
+    var debitoReq = 0; // token: solo l'ultima richiesta puo' renderizzare
 
     function caricaDebito() {
       var foglioLbl = document.getElementById('debtFoglioLbl');
       var foglioVal = document.getElementById('debtFoglioVal');
       var netLbl = document.getElementById('debtNetLbl');
       var netVal = document.getElementById('debtNetVal');
-      foglioLbl.textContent = altraPersona() + ' deve a ' + persona;
-      netLbl.textContent = 'Saldo netto ' + conto;
+      var saldaBtn = document.getElementById('saldaBtn');
+
+      // Fotografia di persona/conto AL MOMENTO DELLA RICHIESTA. Senza questa, il
+      // rendering leggeva le variabili correnti e cambiando tab in fretta si
+      // vedevano i numeri di un foglio con le etichette e la valuta di un altro.
+      var myReq = ++debitoReq;
+      var pReq = persona, cReq = conto;
+      var altraReq = pReq === 'Riccardo' ? 'Roberta' : 'Riccardo';
+      var simbReq = cReq === 'Euro' ? '€' : 'CHF';
+      function fmtReq(n) {
+        return simbReq + ' ' + (Math.round(n * 100) / 100).toFixed(2).replace('.', ',');
+      }
+
+      foglioLbl.textContent = altraReq + ' deve a ' + pReq;
+      netLbl.textContent = 'Saldo netto ' + cReq;
       foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
       netVal.textContent = '…'; netVal.className = 'debtVal';
-      document.getElementById('saldaBtn').textContent = 'Saldato · azzera split ' + persona + ' ' + conto;
+      saldaBtn.textContent = 'Saldato · azzera split ' + pReq + ' ' + cReq;
+      // Disabilitato finche' i dati non sono quelli del foglio mostrato, cosi'
+      // non si puo' saldare guardando numeri di un altro tab.
+      saldaBtn.disabled = true;
       document.getElementById('saldaMsg').textContent = '';
 
-      fetch(API + '?action=debito&gid=' + gid() + '&gidPartner=' + partnerGid())
+      fetch(API + '?action=debito&gid=' + TABS[pReq][cReq] + '&gidPartner=' + TABS[altraReq][cReq])
         .then(function (r) { return r.json(); })
         .then(function (j) {
+          if (myReq !== debitoReq) return; // risposta superata da una piu' recente
+          saldaBtn.disabled = false;
           var d = j && j.debito;
           if (!d || !d.mio) { foglioVal.textContent = '—'; netVal.textContent = '—'; return; }
 
           // Meta condivisa di questo foglio (quanto l'altra persona deve).
           if (d.mio.meta > 0.005) {
-            foglioVal.textContent = fmtImporto(d.mio.meta);
+            foglioVal.textContent = fmtReq(d.mio.meta);
             foglioVal.className = 'debtVal';
           } else {
             foglioVal.textContent = 'nessuna spesa condivisa';
@@ -341,18 +356,20 @@
           var netto = d.netto || 0;
           var abs = Math.abs(netto);
           if (abs < 0.005) {
-            netLbl.textContent = 'Saldo netto ' + conto;
+            netLbl.textContent = 'Saldo netto ' + cReq;
             netVal.textContent = 'in pari';
             netVal.className = 'debtVal zero';
           } else {
-            var chi = netto > 0 ? altraPersona() : persona;
-            var aChi = netto > 0 ? persona : altraPersona();
-            netLbl.textContent = chi + ' deve a ' + aChi + ' (' + conto + ')';
-            netVal.textContent = fmtImporto(abs);
+            var chi = netto > 0 ? altraReq : pReq;
+            var aChi = netto > 0 ? pReq : altraReq;
+            netLbl.textContent = chi + ' deve a ' + aChi + ' (' + cReq + ')';
+            netVal.textContent = fmtReq(abs);
             netVal.className = 'debtVal';
           }
         })
         .catch(function () {
+          if (myReq !== debitoReq) return;
+          saldaBtn.disabled = false;
           foglioVal.textContent = '(errore)'; foglioVal.className = 'debtVal zero';
           netVal.textContent = '';
         });
