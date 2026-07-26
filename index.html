@@ -382,8 +382,26 @@
           }
           btn.disabled = false;
         })
-        .catch(function (e) {
-          m.className = 'saldaMsg err'; m.textContent = 'Errore di rete: ' + e.message;
+        .catch(function () {
+          // Una fetch fallita non dice se il foglio sia stato toccato o no.
+          // Invece di lasciare il dubbio, ricontrolliamo il totale reale: se e'
+          // ancora diverso da zero l'azzeramento non e' passato e si puo' riprovare.
+          m.className = 'saldaMsg'; m.textContent = 'Errore di rete, verifico…';
+          fetch(API + '?action=debito&gid=' + gid())
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+              var d = j && j.debito && j.debito.mio;
+              if (d && d.conteggio === 0) {
+                m.className = 'saldaMsg ok'; m.textContent = '✓ Era comunque andata a buon fine';
+              } else {
+                m.className = 'saldaMsg err';
+                m.textContent = 'Non azzerato (' + (d ? d.conteggio : '?') + ' spunte ancora attive), riprova';
+              }
+              caricaDebito();
+            })
+            .catch(function () {
+              m.className = 'saldaMsg err'; m.textContent = 'Rete non raggiungibile, riprova';
+            });
           btn.disabled = false;
         });
     });
