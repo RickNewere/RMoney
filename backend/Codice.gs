@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v16';
+var VERSION = 'v17';
 
 // ---------- Router ----------
 function doGet(e) {
@@ -67,6 +67,11 @@ function doGet(e) {
     var gidD = parseInt(e.parameter.gid, 10);
     var gidP = e.parameter.gidPartner ? parseInt(e.parameter.gidPartner, 10) : null;
     return _json({ ok: true, version: VERSION, debito: getDebito(gidD, gidP) });
+  }
+  // Elenco riga per riga delle spese condivise, per verificare il debito a mano.
+  if (action === 'condivise') {
+    var gidL = parseInt(e.parameter.gid, 10);
+    return _json({ ok: true, version: VERSION, condivise: elencoCondivise(gidL) });
   }
   if (action === 'riepilogo') {
     var gidS = parseInt(e.parameter.gid, 10);
@@ -404,6 +409,51 @@ function _totaleCondivise(gid) {
     if (!isNaN(n)) { tot += Math.abs(n); cnt++; }
   }
   return { totale: tot, meta: tot / 2, conteggio: cnt };
+}
+
+// SOLO LETTURA: elenca una per una le righe considerate condivise, con il
+// numero di riga del foglio, per poter verificare a mano il totale del debito.
+// Usa esattamente gli stessi criteri di _totaleCondivise.
+function elencoCondivise(gid) {
+  var sheet = _getSheetByGid(gid);
+  var h = _findHeader(sheet);
+  var headers = h.headers;
+  var lastCol = h.lastCol;
+
+  var idxData  = _colFor(headers, ['data']);
+  var idxSpesa = _colFor(headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
+  var idxCat   = _colFor(headers, ['categor']);
+  var idxNota  = _colFor(headers, ['dettagl', 'nota', 'note', 'descriz']);
+  var idxSplit = _colFor(headers, ['split']);
+  if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
+  if (idxSpesa < 0 || idxNota < 0) return { tab: sheet.getName(), righe: [], totale: 0 };
+
+  var firstData = h.row + 1;
+  var last = sheet.getLastRow();
+  if (last < firstData) return { tab: sheet.getName(), righe: [], totale: 0 };
+
+  var vals = sheet.getRange(firstData, 1, last - firstData + 1, lastCol).getValues();
+  var out = [], tot = 0;
+  for (var i = 0; i < vals.length; i++) {
+    var row = vals[i];
+    if (!_isCondivisa(row, idxSplit, idxNota, lastCol)) continue;
+    var v = row[idxSpesa];
+    var n = (typeof v === 'number')
+      ? v
+      : parseFloat(String(v).replace(/[^0-9,.\-]/g, '').replace(',', '.'));
+    if (isNaN(n)) continue;
+    var d = row[idxData];
+    tot += Math.abs(n);
+    out.push({
+      riga: firstData + i,
+      data: (d instanceof Date) ? _fmtDate(d) : String(d),
+      importo: Math.abs(n),
+      categoria: idxCat >= 0 ? String(row[idxCat]).trim() : '',
+      nota: String(row[idxNota]).trim(),
+      split: String(row[idxSplit >= 0 ? idxSplit : idxNota + 1])
+    });
+  }
+  return { tab: sheet.getName(), righe: out, totale: tot, meta: tot / 2 };
 }
 
 // Compone il debito del foglio selezionato e (se passato) del foglio partner
