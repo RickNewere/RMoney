@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v15';
+var VERSION = 'v16';
 
 // ---------- Router ----------
 function doGet(e) {
@@ -268,15 +268,10 @@ function aggiungiSpesa(dati) {
   // I fogli hanno il formato contabile (" € 9,50 ") applicato a un intervallo
   // finito, quindi quando i dati lo superano le nuove righe nascono senza
   // formato e l'importo appare come "1" invece di " € 1,00 " (successo davvero
-  // su LOG RICCARDO alla riga 770). Copiamo il formato dalla riga precedente.
-  var prev = r - 1;
-  if (prev > h.row) {
-    sheet.getRange(prev, 1, 1, lastCol).copyTo(
-      sheet.getRange(r, 1, 1, lastCol),
-      SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
-      false
-    );
-  }
+  // su LOG RICCARDO dalla riga 770).
+  // Il modello e' la PRIMA riga di dati, non quella precedente: se le ultime
+  // righe sono gia' rotte, copiare da li' propagherebbe il difetto.
+  _copiaFormatoRiga(sheet, h.row + 1, r, lastCol);
 
   // Formatta la data come "giorno mese anno" (es. 20 lug 2026), senza orario.
   if (idxData >= 0) {
@@ -292,6 +287,73 @@ function aggiungiSpesa(dati) {
     cell.insertCheckboxes();
     if (dati.segno) cell.setValue(true);
   }
+}
+
+// Copia i SOLI formati (valuta, font, allineamento, bordi) da una riga modello
+// a una riga di destinazione. Non tocca nessun valore.
+function _copiaFormatoRiga(sheet, rigaModello, rigaDest, lastCol) {
+  if (rigaModello < 1 || rigaModello === rigaDest) return;
+  sheet.getRange(rigaModello, 1, 1, lastCol).copyTo(
+    sheet.getRange(rigaDest, 1, 1, lastCol),
+    SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
+    false
+  );
+}
+
+/**
+ * Ripara la formattazione di righe gia' scritte male, senza toccare i valori.
+ * Da lanciare a mano dall'editor Apps Script (menu Esegui).
+ *
+ * Per ogni riga dell'intervallo: copia i formati dalla prima riga di dati,
+ * riapplica il formato data e rimette la checkbox nella colonna split
+ * conservando le spunte gia' presenti.
+ *
+ * Scrive SOLO formattazione e checkbox: date, importi, categorie e note
+ * restano esattamente come sono.
+ */
+function sistemaFormatoRighe(gid, daRiga, aRiga) {
+  var sheet = _getSheetByGid(gid);
+  var h = _findHeader(sheet);
+  var lastCol = h.lastCol;
+  var modello = h.row + 1; // prima riga di dati: sempre formattata bene
+  var n = aRiga - daRiga + 1;
+  if (n < 1) throw new Error('Intervallo righe non valido.');
+  if (daRiga <= h.row) throw new Error('Non toccare le righe di intestazione.');
+
+  var idxSplit = _colFor(h.headers, ['split']);
+  var idxData = _colFor(h.headers, ['data']);
+
+  // insertCheckboxes() azzera il valore: salviamo prima quali erano spuntate.
+  var spunte = [];
+  if (idxSplit >= 0) {
+    var cur = sheet.getRange(daRiga, idxSplit + 1, n, 1).getValues();
+    for (var i = 0; i < n; i++) {
+      var v = cur[i][0];
+      spunte.push([v === true || String(v).trim() === '-']);
+    }
+  }
+
+  for (var k = 0; k < n; k++) {
+    _copiaFormatoRiga(sheet, modello, daRiga + k, lastCol);
+  }
+
+  if (idxData >= 0) {
+    sheet.getRange(daRiga, idxData + 1, n, 1).setNumberFormat('d mmm yyyy');
+  }
+
+  if (idxSplit >= 0) {
+    var rng = sheet.getRange(daRiga, idxSplit + 1, n, 1);
+    rng.insertCheckboxes();
+    rng.setValues(spunte);
+  }
+
+  return 'Sistemate ' + n + ' righe (' + daRiga + '-' + aRiga + ') su ' + sheet.getName();
+}
+
+// Scorciatoia per il caso concreto: LOG RICCARDO euro, righe 770-774.
+// Selezionala nell'editor Apps Script e premi Esegui.
+function sistemaRigheRotteRiccardoEuro() {
+  return sistemaFormatoRighe(113020932, 770, 774);
 }
 
 // ---------- Debito condiviso (righe col trattino) ----------
