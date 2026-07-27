@@ -34,8 +34,8 @@
               "name": "Debito",
               "label": "RMoney · debito",
               "description": "Quanto deve ancora l'altra persona, in euro e in franchi",
-              "minWidth": "250dp",
-              "minHeight": "110dp",
+              "minWidth": "200dp",
+              "minHeight": "80dp",
               "resizeMode": "horizontal|vertical",
               "updatePeriodMillis": 1800000
             }

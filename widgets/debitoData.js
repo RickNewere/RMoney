@@ -56,12 +56,19 @@ async function leggiCoppia(api, c) {
   if (!j || !j.ok || !j.debito) throw new Error('Risposta inattesa dal backend.');
 
   const netto = Number(j.debito.netto) || 0;
+  // Chi deve dare i soldi all'altro. Sotto il centesimo si considera pari.
+  const pari = Math.abs(netto) < 0.005;
+  const debitore = pari ? null : (netto > 0 ? PARTNER : PERSONA);
+  const creditore = debitore === PERSONA ? PARTNER : PERSONA;
+
   return {
     valuta: c.valuta,
     simbolo: c.simbolo,
     importo: Math.abs(netto),
-    // Chi deve dare i soldi all'altro. Sotto il centesimo si considera pari.
-    debitore: Math.abs(netto) < 0.005 ? null : (netto > 0 ? PARTNER : PERSONA),
+    debitore: debitore,
+    // Frase intera: "Riccardo deve" da solo non dice a chi, e nel widget lo
+    // spazio in orizzontale c'e'.
+    frase: pari ? 'siete in pari' : debitore + ' deve a ' + creditore,
   };
 }
 
@@ -90,8 +97,12 @@ export async function leggiDebito() {
   }
 }
 
+// Formato italiano, con il punto per le migliaia: 1165.86 -> "1.165,86".
+// Senza separatore un importo a quattro cifre nel widget si legge male.
 export function formattaImporto(n) {
-  return Number(n).toFixed(2).replace('.', ',');
+  const parti = Number(n).toFixed(2).split('.');
+  const intera = parti[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return intera + ',' + parti[1];
 }
 
 export function formattaOra(ts) {

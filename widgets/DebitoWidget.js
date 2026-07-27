@@ -5,19 +5,23 @@ import { formattaImporto, formattaOra } from './debitoData';
 function tavolozza(tema) {
   if (tema === 'dark') {
     return {
-      sfondo: '#0f1115',
-      riquadro: '#1a1d24',
-      titolo: '#e5e7eb',
-      attenuato: '#8b93a1',
+      sfondo: '#12141a',
+      riga: '#1c1f27',
+      badge: '#2a2f3a',
+      titolo: '#f3f4f6',
+      testo: '#e5e7eb',
+      attenuato: '#7c8496',
       riccardo: '#fbbf24',
-      roberta: '#60a5fa',
+      roberta: '#5eb0f7',
       pari: '#9ca3af',
     };
   }
   return {
     sfondo: '#ffffff',
-    riquadro: '#f2f4f7',
+    riga: '#f4f6f9',
+    badge: '#e4e8ef',
     titolo: '#0f1720',
+    testo: '#111827',
     attenuato: '#6b7280',
     riccardo: '#b45309',
     roberta: '#1d4ed8',
@@ -30,33 +34,53 @@ function coloreDi(debitore, p) {
   return debitore === 'Riccardo' ? p.riccardo : p.roberta;
 }
 
-function Colonna({ voce, p }) {
+// Una riga per valuta: pastiglia con il simbolo a sinistra, importo e direzione
+// a destra. In orizzontale ci sta la frase intera ("Riccardo deve a Roberta"),
+// che in colonna veniva tagliata a meta'.
+function Riga({ voce, p }) {
+  const colore = coloreDi(voce.debitore, p);
+
   return (
     <FlexWidget
       style={{
+        width: 'match_parent',
         flex: 1,
-        height: 'match_parent',
-        flexDirection: 'column',
-        justifyContent: 'center',
-        backgroundColor: p.riquadro,
-        borderRadius: 14,
-        paddingHorizontal: 12,
-        paddingVertical: 10,
-        marginHorizontal: 4,
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: p.riga,
+        borderRadius: 11,
+        paddingHorizontal: 9,
+        paddingVertical: 5,
+        marginTop: 4,
       }}
     >
-      <TextWidget
-        text={voce.valuta.toUpperCase()}
-        style={{ fontSize: 10, fontWeight: '500', color: p.attenuato }}
-      />
-      <TextWidget
-        text={formattaImporto(voce.importo) + ' ' + voce.simbolo}
-        style={{ fontSize: 20, fontWeight: '700', color: coloreDi(voce.debitore, p) }}
-      />
-      <TextWidget
-        text={voce.debitore ? voce.debitore + ' deve' : 'in pari'}
-        style={{ fontSize: 11, color: p.attenuato }}
-      />
+      <FlexWidget
+        style={{
+          width: 34,
+          height: 21,
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: p.badge,
+          borderRadius: 7,
+          marginRight: 9,
+        }}
+      >
+        <TextWidget
+          text={voce.simbolo}
+          style={{ fontSize: 10, fontWeight: '700', color: p.attenuato }}
+        />
+      </FlexWidget>
+
+      <FlexWidget style={{ flex: 1, flexDirection: 'column' }}>
+        <TextWidget
+          text={formattaImporto(voce.importo)}
+          style={{ fontSize: 17, fontWeight: '700', color: colore }}
+        />
+        <TextWidget
+          text={voce.frase}
+          style={{ fontSize: 9, color: p.attenuato }}
+        />
+      </FlexWidget>
     </FlexWidget>
   );
 }
@@ -72,9 +96,9 @@ export function DebitoWidget({ dati, tema = 'light' }) {
         width: 'match_parent',
         flexDirection: 'column',
         backgroundColor: p.sfondo,
-        borderRadius: 18,
-        paddingHorizontal: 10,
-        paddingVertical: 10,
+        borderRadius: 16,
+        paddingHorizontal: 9,
+        paddingVertical: 7,
       }}
       clickAction="OPEN_APP"
     >
@@ -84,27 +108,26 @@ export function DebitoWidget({ dati, tema = 'light' }) {
           flexDirection: 'row',
           justifyContent: 'space-between',
           alignItems: 'center',
-          paddingHorizontal: 4,
-          marginBottom: 8,
+          paddingHorizontal: 2,
         }}
       >
         <TextWidget
           text="Debito condiviso"
-          style={{ fontSize: 13, fontWeight: '700', color: p.titolo }}
+          style={{ fontSize: 11, fontWeight: '700', color: p.titolo }}
         />
-        {/* Android non aggiorna un widget piu' di una volta ogni 30 minuti, quindi
-            serve un modo esplicito per forzare la lettura. */}
+        {/* Android non ridisegna un widget piu' di una volta ogni 30 minuti,
+            quindi serve un tocco esplicito per forzare la lettura. */}
         <FlexWidget
-          style={{ paddingHorizontal: 8, paddingVertical: 4 }}
+          style={{ paddingHorizontal: 6, paddingVertical: 2 }}
           clickAction="AGGIORNA"
         >
           <TextWidget
             text={
               !dati || !dati.aggiornato
-                ? 'aggiorna'
-                : (dati.vecchio ? 'vecchio · ' : '') + formattaOra(dati.aggiornato)
+                ? 'tocca per aggiornare'
+                : (dati.vecchio ? 'vecchio, ' : 'agg. ') + formattaOra(dati.aggiornato)
             }
-            style={{ fontSize: 10, color: p.attenuato }}
+            style={{ fontSize: 9, color: p.attenuato }}
           />
         </FlexWidget>
       </FlexWidget>
@@ -114,12 +137,12 @@ export function DebitoWidget({ dati, tema = 'light' }) {
           style={{
             width: 'match_parent',
             flex: 1,
-            flexDirection: 'row',
-            alignItems: 'stretch',
+            flexDirection: 'column',
+            justifyContent: 'center',
           }}
         >
           {voci.map((v) => (
-            <Colonna key={v.valuta} voce={v} p={p} />
+            <Riga key={v.valuta} voce={v} p={p} />
           ))}
         </FlexWidget>
       ) : (
