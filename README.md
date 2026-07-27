@@ -19,6 +19,14 @@ Any expense can be marked as shared, meaning it is split in half between the two
 
 When the balance is settled, one button clears all the shared marks for that tab. The expenses themselves are never removed, only the shared flag.
 
+## Home screen widget
+
+On Android the app comes with a home screen widget that shows the shared balance without opening anything: how much is still owed in euros and in francs, and who owes it. It refreshes on its own every half hour, and tapping the time in the corner forces a refresh straight away. Tapping anywhere else opens the app.
+
+If the phone is offline the widget keeps showing the last figure it managed to read, marked as old, rather than going blank.
+
+The widget is Android only. On iPhone the app runs as a web app on the home screen, which cannot provide widgets.
+
 ## Summary
 
 A separate summary view answers the question of where the money went. You choose the period, either a full year or a single month, and the currency, euros or francs.

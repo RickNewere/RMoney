@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 RMoney is a personal expense-entry app (two users: Riccardo and Roberta) that appends rows to a shared Google Spreadsheet (ID `10NT_nAkXRX12sEzFdpa6khSnONfjwm-NHGguoDm215U`). There are two sibling projects on the Desktop that share the same backend:
 
-- `C:\Users\rober\Desktop\RMoney` (this folder) — Expo/React Native app, installed on Android as a locally-built APK. Also contains the backend source in `backend/Codice.gs`. **`App.js` is now a thin WebView shell** (`react-native-webview`) that loads the live web app (`SITE_URL = https://ricknewere.github.io/RMoney/`), so Android has full feature parity with the web (insert, debito, riepilogo, charts) and future web changes need no APK rebuild. The old native insert form was replaced; `App.js` no longer imports `config.js`, so its `TABS`/`API_URL` are unused by Android now (kept for reference).
+- `C:\Users\rober\Desktop\RMoney` (this folder) — Expo/React Native app, installed on Android as a locally-built APK. Also contains the backend source in `backend/Codice.gs`. **`App.js` is now a thin WebView shell** (`react-native-webview`) that loads the live web app (`SITE_URL = https://ricknewere.github.io/RMoney/`), so Android has full feature parity with the web (insert, debito, riepilogo, charts) and future web changes need no APK rebuild. The old native insert form was replaced, so `App.js` no longer imports `config.js`. Consequence worth knowing: **Android inherits the backend URL from the web page**, so a new Apps Script deployment reaches Android with no APK rebuild. `config.js` is not dead though — the home screen widget imports `TABS` and `API_URL` from it, and that is the only thing still reading it.
 - `C:\Users\rober\Desktop\RMoney-web` — static PWA (single `index.html`), deployed to GitHub Pages at https://ricknewere.github.io/RMoney/ (repo `RickNewere/RMoney`, public). This is the iPhone client (Add to Home Screen from Safari).
 
 UI language is Italian; keep it that way. Both clients must stay visually and functionally identical (brand title "💸 RMoney", same fields and behavior).
@@ -84,6 +84,19 @@ Known pitfalls:
 - `babel-preset-expo` must stay pinned `~54.0.10` to match Expo SDK 54 — a newer major breaks the build.
 - `npx expo export` fails on Windows (hermesc.exe "private properties are not supported") — known Windows-only bug; it does NOT affect `expo start` or the Gradle build. Validate bundles via the dev server instead.
 - After reinstalling the APK, Android launcher may cache the old icon (uninstall + reboot fixes it).
+
+## Android home screen widget
+
+A single widget, **"Debito"**, shows the shared balance per currency. It is the one part of the Android app that is NOT the WebView, and that is not a choice: an Android widget is drawn by the launcher process from `RemoteViews`, so it cannot host a WebView or run the web app. Built with `react-native-android-widget` (v0.21, Expo config plugin). Expo's own `expo-widgets` is iOS only, which is also why the iPhone client, being a home screen web app, can never have one.
+
+Files: `widgets/DebitoWidget.js` (rendering), `widgets/debitoData.js` (fetch + cache + formatting), `widgetTaskHandler.js` (dispatch), `index.js` (entry point).
+
+- **`package.json` `main` is `index.js`, not `expo/AppEntry.js`.** The widget handler has to be registered next to `registerRootComponent`, and the default Expo entry point only does the latter. Reverting `main` silently disables the widget: the app still runs, the widget just never draws.
+- The widget declaration lives in `app.json` under `plugins`. `expo prebuild` turns it into `android/app/src/main/res/xml/widgetprovider_debito.xml`, a `<receiver android:name=".widget.Debito">` in the manifest, and a generated `widget/Debito.java` extending `RNWidgetProvider`. All of that is regenerated, so never hand-edit it — change `app.json` and prebuild.
+- **The backend URL is resolved at runtime** from `https://ricknewere.github.io/RMoney/api.json`, with `config.js`'s `API_URL` as fallback. This exists because the Apps Script URL changes on every "Nuova distribuzione" (five times in a single day of work at one point) and a URL compiled into the APK would leave the widget dead until someone rebuilt it. That JSON file lives in the `RMoney-web` repo and has to be updated together with `index.html`.
+- `leggiDebito()` never rejects. On any failure it falls back to the last value cached in AsyncStorage, flagged `vecchio`, because a widget showing a stale number beats one showing nothing. If there is no cache either it returns empty and the widget invites a tap.
+- **Android will not auto-refresh a widget more often than every 30 minutes** (`updatePeriodMillis: 1800000` is already at the floor; anything lower is silently ignored). That is why the timestamp in the corner is its own tap target with `clickAction="AGGIORNA"` — it is the only way to force a read. Tapping anywhere else is `OPEN_APP`.
+- Adding the widget **breaks the "no APK rebuild" property** the WebView shell was designed for: widget changes ship only in a new APK. Keep logic here to a minimum for that reason, and prefer changing the web app.
 
 ## Web client deploy
 
