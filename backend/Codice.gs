@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v17';
+var VERSION = 'v18';
 
 // ---------- Router ----------
 function doGet(e) {
@@ -85,6 +85,18 @@ function doGet(e) {
     var anno = parseInt(e.parameter.anno, 10) || oggi.getFullYear();
     var mese = parseInt(e.parameter.mese, 10) || (oggi.getMonth() + 1);
     return _json({ ok: true, version: VERSION, riepilogo: getRiepCalc(conto, tipo, anno, mese) });
+  }
+  // Elenco riga per riga delle spese di UNA categoria (drill-down dal
+  // riepilogo: click su una categoria -> lista delle singole spese).
+  if (action === 'spese') {
+    var contoSp = e.parameter.conto || 'Euro';
+    var tipoSp = e.parameter.tipo || 'annuale';
+    var oggiSp = new Date();
+    var annoSp = parseInt(e.parameter.anno, 10) || oggiSp.getFullYear();
+    var meseSp = parseInt(e.parameter.mese, 10) || (oggiSp.getMonth() + 1);
+    var personaSp = e.parameter.persona || 'Insieme';
+    var categoriaSp = e.parameter.categoria || '';
+    return _json({ ok: true, version: VERSION, spese: elencoSpeseCategoria(contoSp, tipoSp, annoSp, meseSp, personaSp, categoriaSp) });
   }
   // TEMP: valida il ricalcolo dai LOG contro i numeri dei fogli SOMMARIO.
   if (action === 'riepvalida') {
@@ -635,6 +647,7 @@ function _riepLogRows(gid) {
   var idxData = _colFor(headers, ['data']);
   var idxImp = _colFor(headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
   var idxCat = _colFor(headers, ['categor']);
+  var idxNota = _colFor(headers, ['dettagl', 'nota', 'note', 'descriz']);
   if (idxImp < 0 && idxData >= 0) idxImp = idxData + 1;
   if (idxData < 0 || idxCat < 0) return [];
   var first = h.row + 1, last = sheet.getLastRow();
@@ -652,9 +665,60 @@ function _riepLogRows(gid) {
     if (!cat) continue;
     var amt = vals[i][idxImp];
     amt = (typeof amt === 'number') ? amt : _riepNum(amt);
-    out.push({ date: d, amount: Math.abs(amt), cat: cat });
+    out.push({
+      date: d,
+      amount: Math.abs(amt),
+      cat: cat,
+      nota: idxNota >= 0 ? String(vals[i][idxNota]).trim() : '',
+      riga: first + i
+    });
   }
   return out;
+}
+
+// SOLO LETTURA: singole spese di una categoria nel periodo scelto, ordinate
+// dalla piu' recente. persona = 'Riccardo' | 'Roberta' | 'Insieme'.
+// Alimenta il drill-down del riepilogo (click su una categoria).
+function elencoSpeseCategoria(conto, tipo, anno, mese, persona, categoria) {
+  var gids = LOG_GIDS[conto] || LOG_GIDS.Euro;
+  var start, end;
+  if (tipo === 'mensile') { start = new Date(anno, mese - 1, 1); end = new Date(anno, mese, 1); }
+  else { start = new Date(anno, 0, 1); end = new Date(anno + 1, 0, 1); }
+
+  var quali = persona === 'Riccardo' ? ['Riccardo']
+    : persona === 'Roberta' ? ['Roberta']
+      : ['Riccardo', 'Roberta'];
+  var cercata = String(categoria).trim().toLowerCase();
+
+  var out = [], tot = 0;
+  quali.forEach(function (chi) {
+    var rows = _riepLogRows(gids[chi]);
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      if (r.date < start || r.date >= end) continue;
+      if (r.cat.toLowerCase() !== cercata) continue;
+      tot += r.amount;
+      out.push({
+        data: _fmtDate(r.date),
+        ts: r.date.getTime(),
+        importo: r.amount,
+        nota: r.nota,
+        persona: chi,
+        riga: r.riga
+      });
+    }
+  });
+  out.sort(function (a, b) { return b.ts - a.ts; });
+
+  return {
+    categoria: categoria,
+    persona: persona,
+    valuta: conto === 'Franchi' ? 'CHF' : '€',
+    periodo: { inizio: _fmtDate(start), fine: _fmtDate(new Date(end.getTime() - 86400000)) },
+    righe: out,
+    totale: tot,
+    conteggio: out.length
+  };
 }
 
 // true se la categoria e' una delle 15 di spesa. Tutto il resto (stipendi,
