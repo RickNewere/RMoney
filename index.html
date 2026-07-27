@@ -830,7 +830,14 @@
     // dal form. Svuota la riga sul foglio lasciandola al suo posto.
     document.getElementById('detTable').addEventListener('click', function (ev) {
       var b = ev.target.closest('.delBtn'); if (!b) return;
+      var gid = b.getAttribute('data-gid');
       var riga = b.getAttribute('data-riga');
+      // Senza un foglio valido non si tocca niente: meglio fermarsi che
+      // mandare al backend un gid inventato.
+      if (!/^\d+$/.test(gid) || !/^\d+$/.test(riga)) {
+        document.getElementById('detMsg').textContent = 'Riga non identificabile, ricarica.';
+        return;
+      }
       var nota = b.getAttribute('data-nota');
       var quando = b.getAttribute('data-data');
       var quanto = parseFloat(b.getAttribute('data-importo'));
@@ -850,7 +857,7 @@
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({
           op: 'elimina',
-          gid: b.getAttribute('data-gid'),
+          gid: gid,
           riga: riga,
           // Il backend rifiuta se la riga nel frattempo e' cambiata.
           atteso: { importo: quanto, nota: nota, categoria: detCtx ? detCtx.cat : '' }
@@ -955,10 +962,13 @@
             var nota = r.nota ? '<span class="nota">' + esc(r.nota) + '</span>' : '';
             // I dati della riga viaggiano con il bottone: servono al backend
             // per ricontrollare di star svuotando davvero questa spesa.
+            // Il foglio si ricava da persona + valuta con la mappa TABS: non
+            // dipende da cosa manda il backend, quindi non puo' arrivare vuoto.
+            var gidRiga = (TABS[r.persona] || {})[c.valuta];
             html += '<tr><td class="d">' + esc(r.data) + chi + nota + '</td>'
               + '<td class="v">' + fmtReq(r.importo) + '</td>'
               + '<td class="x"><button class="delBtn" title="Elimina questa spesa"'
-              + ' data-gid="' + r.gid + '" data-riga="' + r.riga + '"'
+              + ' data-gid="' + gidRiga + '" data-riga="' + r.riga + '"'
               + ' data-importo="' + r.importo + '"'
               + ' data-nota="' + esc(r.nota || '') + '"'
               + ' data-data="' + esc(r.data) + '">×</button></td></tr>';
