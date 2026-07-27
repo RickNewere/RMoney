@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v18';
+var VERSION = 'v19';
 
 // ---------- Router ----------
 function doGet(e) {
@@ -123,6 +123,9 @@ function doPost(e) {
     if (body.op === 'salda') {
       var res = saldaFoglio(parseInt(body.gid, 10));
       return _json({ ok: true, azzerate: res.azzerate });
+    }
+    if (body.op === 'elimina') {
+      return _json(svuotaRiga(parseInt(body.gid, 10), parseInt(body.riga, 10), body.atteso));
     }
     aggiungiSpesa(body);
     return _json({ ok: true });
@@ -704,7 +707,8 @@ function elencoSpeseCategoria(conto, tipo, anno, mese, persona, categoria) {
         importo: r.amount,
         nota: r.nota,
         persona: chi,
-        riga: r.riga
+        riga: r.riga,
+        gid: gids[chi] // il client deve sapere su quale foglio sta agendo
       });
     }
   });
@@ -827,6 +831,80 @@ function saldaFoglio(gid) {
   rng.setValues(out);      // un'unica scrittura, solo la colonna split
   rng.insertCheckboxes();  // garantisce la checkbox (niente testo "false")
   return { azzerate: n };
+}
+
+// ---------- Elimina una spesa: svuota la riga, non la rimuove ----------
+// SCRITTURA MIRATA A UNA SOLA RIGA. Svuota i contenuti di data, importo,
+// categoria e nota e riporta la checkbox split a non spuntata. La riga resta
+// al suo posto, vuota e con la sua formattazione: cancellare la riga vera
+// sposterebbe tutte quelle sotto e invaliderebbe ogni numero di riga gia'
+// mostrato nell'app (i "riga" restituiti da elencoSpeseCategoria).
+//
+// Il numero di riga da solo non basta come indirizzo: se il foglio e' cambiato
+// da quando l'app ha caricato l'elenco, quel numero puo' puntare a un'altra
+// spesa. Per questo la chiamata porta con se' i valori attesi e la riga viene
+// svuotata solo se combaciano ancora.
+function svuotaRiga(gid, riga, atteso) {
+  var sheet = _getSheetByGid(gid);
+  var h = _findHeader(sheet);
+  var headers = h.headers, lastCol = h.lastCol;
+
+  if (!riga || riga <= h.row) throw new Error('Riga non valida.');
+  if (riga > sheet.getLastRow()) throw new Error('Riga oltre la fine del foglio.');
+
+  var idxData  = _colFor(headers, ['data']);
+  var idxSpesa = _colFor(headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
+  var idxCat   = _colFor(headers, ['categor']);
+  var idxNota  = _colFor(headers, ['dettagl', 'nota', 'note', 'descriz']);
+  var idxSplit = _colFor(headers, ['split']);
+  if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
+
+  var row = sheet.getRange(riga, 1, 1, lastCol).getValues()[0];
+
+  // Verifica che la riga sia ancora quella che l'utente ha visto.
+  if (atteso) {
+    if (atteso.importo != null && idxSpesa >= 0) {
+      var v = row[idxSpesa];
+      var n = (typeof v === 'number') ? v : _riepNum(v);
+      if (Math.abs(Math.abs(n) - Math.abs(parseFloat(atteso.importo))) > 0.005) {
+        throw new Error('La riga ' + riga + ' non contiene piu\' l\'importo atteso: ricarica l\'elenco.');
+      }
+    }
+    if (atteso.nota != null && idxNota >= 0) {
+      if (String(row[idxNota]).trim() !== String(atteso.nota).trim()) {
+        throw new Error('La riga ' + riga + ' non contiene piu\' la nota attesa: ricarica l\'elenco.');
+      }
+    }
+    if (atteso.categoria != null && idxCat >= 0) {
+      if (String(row[idxCat]).trim().toLowerCase() !== String(atteso.categoria).trim().toLowerCase()) {
+        throw new Error('La riga ' + riga + ' non e\' piu\' di questa categoria: ricarica l\'elenco.');
+      }
+    }
+  }
+
+  // Cosa stiamo per cancellare, per poterlo riferire (e riscrivere a mano).
+  var prima = {
+    data: (row[idxData] instanceof Date) ? _fmtDate(row[idxData]) : String(row[idxData]),
+    importo: idxSpesa >= 0 ? row[idxSpesa] : '',
+    categoria: idxCat >= 0 ? String(row[idxCat]) : '',
+    nota: idxNota >= 0 ? String(row[idxNota]) : ''
+  };
+
+  // clearContent() toglie i valori ma lascia intatta la formattazione, cosi'
+  // la riga vuota resta identica alle altre e un reinserimento futuro eredita
+  // il formato corretto.
+  [idxData, idxSpesa, idxCat, idxNota].forEach(function (i) {
+    if (i >= 0) sheet.getRange(riga, i + 1).clearContent();
+  });
+
+  // La casella split resta una checkbox vera, semplicemente non spuntata.
+  if (idxSplit >= 0) {
+    var cell = sheet.getRange(riga, idxSplit + 1);
+    cell.insertCheckboxes();
+    cell.setValue(false);
+  }
+
+  return { ok: true, version: VERSION, riga: riga, tab: sheet.getName(), eliminato: prima };
 }
 
 // ---------- Setup una-tantum: crea la colonna "split" con checkbox ----------
