@@ -1062,10 +1062,48 @@ function pulisciCheckboxVuote() {
       _sistemaCheckboxCoda(sheet, h, da, prima - da + 1, idxSplit);
       SpreadsheetApp.flush();
     }
+    // Sotto la soglia il codice non ordina mai nulla, ma qualche riga vuota con
+    // checkbox e' rimasta li' dalle riparazioni fatte a mano (sistemaFormatoRighe
+    // applica la casella a tutto l'intervallo, righe vuote comprese). Quelle in
+    // fondo vanno tolte lo stesso, altrimenti il foglio continua a dichiarare
+    // righe che non contengono niente. Si tolgono solo le righe vuote FINALI: ci
+    // si ferma alla prima che contiene una spesa, cosi' lo storico non si tocca.
+    if (idxSplit >= 0) _togliCodaVuota(sheet, h, idxSplit);
     out.push(sheet.getName() + ': ' + prima + ' -> ' + sheet.getLastRow());
   });
   Logger.log(out.join('\n'));
   return out;
+}
+
+// Toglie la checkbox dalle righe vuote che stanno in fondo al foglio, una alla
+// volta, finche' l'ultima riga non contiene una spesa vera. Non tocca nessun
+// valore: agisce solo sulla colonna split.
+function _togliCodaVuota(sheet, h, idxSplit) {
+  var idxData  = _colFor(h.headers, ['data']);
+  var idxSpesa = _colFor(h.headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
+  var idxCat   = _colFor(h.headers, ['categor']);
+  var idxNota  = _colFor(h.headers, ['dettagl', 'nota', 'note', 'descriz']);
+  if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
+
+  var tolte = 0;
+  for (var giro = 0; giro < 50; giro++) {
+    var last = sheet.getLastRow();
+    if (last <= h.row) break;
+    var row = sheet.getRange(last, 1, 1, h.lastCol).getValues()[0];
+    var vuota = [idxData, idxSpesa, idxCat, idxNota].every(function (k) {
+      return k < 0 || String(row[k]).trim() === '';
+    });
+    if (!vuota) break; // arrivati a una spesa vera: si smette
+    var cell = sheet.getRange(last, idxSplit + 1);
+    cell.removeCheckboxes();
+    cell.clearContent();
+    SpreadsheetApp.flush();
+    // Se il foglio non si accorcia, la riga e' tenuta in vita da un'altra
+    // colonna: inutile insistere, si uscirebbe in loop.
+    if (sheet.getLastRow() >= last) break;
+    tolte++;
+  }
+  return tolte;
 }
 
 // ---------- Setup una-tantum: crea la colonna "split" con checkbox ----------
