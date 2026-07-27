@@ -31,7 +31,19 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v19';
+var VERSION = 'v20';
+
+// Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
+// Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
+// esisteva prima resta dov'e' per sempre, l'ordinamento tocca solo le righe
+// scritte da qui in avanti. Non ricalcolare questi numeri: se li si alza si
+// perde l'ordinamento gia' fatto, se li si abbassa si rimescola lo storico.
+var SORT_FROM = {
+  113020932: 775,   // LOG RICCARDO
+  1888286288: 565,  // LOG ROBERTA
+  650699013: 105,   // LOG RICCARDO CHF
+  1063479927: 106   // LOG ROBERTA CHF
+};
 
 // ---------- Router ----------
 function doGet(e) {
@@ -280,8 +292,17 @@ function aggiungiSpesa(dati) {
     riga[cDx] = '-';
   }
 
-  sheet.appendRow(riga);
-  var r = sheet.getLastRow();
+  // Se una cancellazione ha lasciato una riga vuota nella zona ordinabile la
+  // si riusa, altrimenti si accoda. Cosi' il foglio non cresce di una riga per
+  // ogni spesa cancellata e reinserita.
+  while (riga.length < lastCol) riga.push('');
+  var r = _primaRigaLibera(sheet, h, SORT_FROM[gid]);
+  if (r) {
+    sheet.getRange(r, 1, 1, lastCol).setValues([riga.slice(0, lastCol)]);
+  } else {
+    sheet.appendRow(riga);
+    r = sheet.getLastRow();
+  }
 
   // La riga nuova deve essere identica alle precedenti. appendRow non applica
   // formati: eredita solo quelli gia' presenti nella riga di destinazione.
@@ -307,6 +328,67 @@ function aggiungiSpesa(dati) {
     cell.insertCheckboxes();
     if (dati.segno) cell.setValue(true);
   }
+
+  // Rimette in ordine di data la sola coda del foglio.
+  _ordinaCoda(sheet, gid, h);
+}
+
+// ---------- Ordinamento della sola coda del foglio ----------
+// Riordina per data SOLO le righe dalla soglia SORT_FROM in giu'. Le righe
+// precedenti non vengono mai lette ne' spostate: lo storico e' congelato.
+// Le celle vuote finiscono in fondo all'intervallo ordinato, quindi il buco
+// lasciato da una cancellazione si sposta da solo alla fine e lo spazio torna
+// utilizzabile senza dover cercare la riga libera.
+function _ordinaCoda(sheet, gid, h) {
+  var da = SORT_FROM[gid];
+  if (!da) return 0; // foglio non configurato: non si ordina nulla
+  if (da <= h.row) return 0; // paranoia: mai sopra le intestazioni
+  var last = sheet.getLastRow();
+  var n = last - da + 1;
+  if (n < 2) return 0; // meno di due righe: niente da ordinare
+
+  var idxData = _colFor(h.headers, ['data']);
+  if (idxData < 0) return 0; // senza colonna data non si puo' ordinare
+
+  var rng = sheet.getRange(da, 1, n, h.lastCol);
+  rng.sort({ column: idxData + 1, ascending: true });
+
+  // L'ordinamento sposta i valori: la colonna split va riconfermata come
+  // checkbox, altrimenti una cella puo' restare col testo "true"/"false".
+  var idxSplit = _colFor(h.headers, ['split']);
+  if (idxSplit >= 0) {
+    var col = sheet.getRange(da, idxSplit + 1, n, 1);
+    var vals = col.getValues().map(function (r) {
+      return [r[0] === true || String(r[0]).trim().toLowerCase() === 'true'];
+    });
+    col.insertCheckboxes();
+    col.setValues(vals);
+  }
+  return n;
+}
+
+// Prima riga completamente vuota nella zona ordinabile, o 0 se non ce n'e'.
+// Serve a riusare lo spazio di una spesa cancellata invece di allungare il
+// foglio ogni volta.
+function _primaRigaLibera(sheet, h, da) {
+  if (!da) return 0;
+  var last = sheet.getLastRow();
+  if (last < da) return 0;
+  var idxData = _colFor(h.headers, ['data']);
+  var idxSpesa = _colFor(h.headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
+  var idxCat = _colFor(h.headers, ['categor']);
+  var idxNota = _colFor(h.headers, ['dettagl', 'nota', 'note', 'descriz']);
+  if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
+
+  var vals = sheet.getRange(da, 1, last - da + 1, h.lastCol).getValues();
+  for (var i = 0; i < vals.length; i++) {
+    var row = vals[i];
+    var vuota = [idxData, idxSpesa, idxCat, idxNota].every(function (k) {
+      return k < 0 || String(row[k]).trim() === '';
+    });
+    if (vuota) return da + i;
+  }
+  return 0;
 }
 
 // Copia i SOLI formati (valuta, font, allineamento, bordi) da una riga modello
@@ -904,7 +986,18 @@ function svuotaRiga(gid, riga, atteso) {
     cell.setValue(false);
   }
 
-  return { ok: true, version: VERSION, riga: riga, tab: sheet.getName(), eliminato: prima };
+  // Se la riga svuotata sta nella zona ordinabile, riordinando la coda il
+  // buco scivola in fondo e lo spazio torna disponibile. Sopra la soglia non
+  // si tocca niente e la riga resta vuota dov'e'.
+  var ordinate = 0;
+  if (SORT_FROM[gid] && riga >= SORT_FROM[gid]) {
+    ordinate = _ordinaCoda(sheet, gid, h);
+  }
+
+  return {
+    ok: true, version: VERSION, riga: riga, tab: sheet.getName(),
+    eliminato: prima, righeRiordinate: ordinate
+  };
 }
 
 // ---------- Setup una-tantum: crea la colonna "split" con checkbox ----------
