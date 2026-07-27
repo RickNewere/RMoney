@@ -7,6 +7,7 @@ This is the web/iPhone client of RMoney — a single static PWA (`index.html`, a
 Full system documentation (backend API, spreadsheet column logic, deployment gotchas) lives in the native-app project: `C:\Users\rober\Desktop\RMoney\CLAUDE.md`. Key points that apply here:
 
 - The `API` constant and the `TABS` gid map at the top of `index.html` are duplicated in the native app's `config.js` — keep them in sync when the Apps Script URL or tabs change.
+- **`api.json` must be updated with the same URL.** It is a two-line file, served by Pages alongside the page, whose only reader is the Android home screen widget. The widget is native code inside the APK, so it cannot read the `API` constant in this file, and a URL compiled into the APK would leave the widget dead after every "Nuova distribuzione" until someone rebuilds. Reading `api.json` at runtime is what keeps the widget alive across deployments — so a new Apps Script URL now means editing **two** things here, `index.html` and `api.json`.
 - POST uses `Content-Type: text/plain;charset=utf-8` on purpose (avoids CORS preflight with Apps Script) — don't switch to `application/json`.
 - UI is Italian. **The Android app is now a WebView shell loading this very page**, so this file is the single UI for both clients: a change here ships to Android too, with no APK rebuild.
 
