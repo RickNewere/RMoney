@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v20';
+var VERSION = 'v21';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -353,18 +353,58 @@ function _ordinaCoda(sheet, gid, h) {
   var rng = sheet.getRange(da, 1, n, h.lastCol);
   rng.sort({ column: idxData + 1, ascending: true });
 
-  // L'ordinamento sposta i valori: la colonna split va riconfermata come
-  // checkbox, altrimenti una cella puo' restare col testo "true"/"false".
+  // L'ordinamento sposta i valori: la colonna split va riallineata alle righe
+  // nella loro nuova posizione.
   var idxSplit = _colFor(h.headers, ['split']);
   if (idxSplit >= 0) {
-    var col = sheet.getRange(da, idxSplit + 1, n, 1);
-    var vals = col.getValues().map(function (r) {
-      return [r[0] === true || String(r[0]).trim().toLowerCase() === 'true'];
-    });
-    col.insertCheckboxes();
-    col.setValues(vals);
+    _sistemaCheckboxCoda(sheet, h, da, n, idxSplit);
   }
   return n;
+}
+
+// Riallinea la colonna "split" nella zona ordinabile: checkbox vera sulle righe
+// che contengono una spesa, nessuna checkbox su quelle vuote.
+// Servono due passaggi opposti. Sulle righe piene la casella va riconfermata,
+// altrimenti dopo uno spostamento puo' restare il testo "true"/"false" al posto
+// della casella. Sulle righe vuote va invece tolta: una casella superstite e'
+// un residuo visibile e tiene in vita la riga agli occhi di getLastRow().
+function _sistemaCheckboxCoda(sheet, h, da, n, idxSplit) {
+  var idxData  = _colFor(h.headers, ['data']);
+  var idxSpesa = _colFor(h.headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
+  var idxCat   = _colFor(h.headers, ['categor']);
+  var idxNota  = _colFor(h.headers, ['dettagl', 'nota', 'note', 'descriz']);
+  if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
+
+  var vals = sheet.getRange(da, 1, n, h.lastCol).getValues();
+
+  // Ultima riga che contiene ancora qualcosa. Le celle vuote finiscono in fondo
+  // all'intervallo ordinato, quindi sopra questo indice non ci sono buchi.
+  var ultimaPiena = -1;
+  for (var i = 0; i < n; i++) {
+    var row = vals[i];
+    var vuota = [idxData, idxSpesa, idxCat, idxNota].every(function (k) {
+      return k < 0 || String(row[k]).trim() === '';
+    });
+    if (!vuota) ultimaPiena = i;
+  }
+
+  // removeCheckboxes() azzera anche il valore della cella: le spunte vanno
+  // lette prima di toccare la colonna.
+  var flags = vals.map(function (row) {
+    var v = row[idxSplit];
+    return [v === true || String(v).trim().toLowerCase() === 'true'];
+  });
+
+  var col = sheet.getRange(da, idxSplit + 1, n, 1);
+  col.removeCheckboxes();
+  col.clearContent();
+
+  if (ultimaPiena >= 0) {
+    var piene = sheet.getRange(da, idxSplit + 1, ultimaPiena + 1, 1);
+    piene.insertCheckboxes();
+    piene.setValues(flags.slice(0, ultimaPiena + 1));
+  }
+  return ultimaPiena + 1;
 }
 
 // Prima riga completamente vuota nella zona ordinabile, o 0 se non ce n'e'.
@@ -979,11 +1019,15 @@ function svuotaRiga(gid, riga, atteso) {
     if (i >= 0) sheet.getRange(riga, i + 1).clearContent();
   });
 
-  // La casella split resta una checkbox vera, semplicemente non spuntata.
+  // La checkbox va tolta del tutto, non lasciata vuota: una casella su una riga
+  // senza spesa e' un residuo visibile, e per Google conta come contenuto,
+  // quindi getLastRow() non si accorcia e il foglio continua a dichiarare righe
+  // che non esistono piu'. La checkbox non serve conservarla: aggiungiSpesa la
+  // reinserisce sulla riga di destinazione a ogni scrittura.
   if (idxSplit >= 0) {
     var cell = sheet.getRange(riga, idxSplit + 1);
-    cell.insertCheckboxes();
-    cell.setValue(false);
+    cell.removeCheckboxes();
+    cell.clearContent();
   }
 
   // Se la riga svuotata sta nella zona ordinabile, riordinando la coda il
@@ -998,6 +1042,30 @@ function svuotaRiga(gid, riga, atteso) {
     ok: true, version: VERSION, riga: riga, tab: sheet.getName(),
     eliminato: prima, righeRiordinate: ordinate
   };
+}
+
+// ---------- Manutenzione una-tantum: ripulisce i residui ----------
+// Toglie le checkbox rimaste sulle righe vuote in coda ai quattro fogli. Serve
+// solo a ripulire cio' che le versioni fino alla v20 lasciavano dietro: da v21
+// svuotaRiga non lascia piu' residui, quindi questa va eseguita una volta sola.
+// Da lanciare dall'editor Apps Script (Esegui), non e' esposta come endpoint.
+function pulisciCheckboxVuote() {
+  var out = [];
+  Object.keys(SORT_FROM).forEach(function (k) {
+    var gid = parseInt(k, 10);
+    var sheet = _getSheetByGid(gid);
+    var h = _findHeader(sheet);
+    var idxSplit = _colFor(h.headers, ['split']);
+    var da = SORT_FROM[gid];
+    var prima = sheet.getLastRow();
+    if (idxSplit >= 0 && prima >= da) {
+      _sistemaCheckboxCoda(sheet, h, da, prima - da + 1, idxSplit);
+      SpreadsheetApp.flush();
+    }
+    out.push(sheet.getName() + ': ' + prima + ' -> ' + sheet.getLastRow());
+  });
+  Logger.log(out.join('\n'));
+  return out;
 }
 
 // ---------- Setup una-tantum: crea la colonna "split" con checkbox ----------
