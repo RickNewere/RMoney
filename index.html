@@ -110,9 +110,16 @@
     .catTable tr.tot td { border-top:2px solid var(--border); font-weight:800; font-size:13px; }
     .catEmpty { text-align:center; color:var(--muted); font-size:13px; padding:18px 0; }
     .catLink { color:var(--accent); text-decoration:underline; cursor:pointer; }
-    .backBtn { background:transparent; border:none; color:var(--accent); font-size:15px; font-weight:700; padding:0 0 12px; }
+    /* Sticky in cima: dalle liste lunghe si torna indietro senza risalire. */
+    .backBtn {
+      display:block; max-width:480px; margin:0 auto 14px; width:100%;
+      position:sticky; top:0; z-index:5;
+      padding:13px; border-radius:14px; border:1px solid var(--border);
+      background:var(--card); color:var(--accent); font-size:16px; font-weight:800; text-align:left;
+    }
     .detTitle { font-size:20px; font-weight:800; margin:0 0 4px; }
-    .detSub { font-size:13px; color:var(--muted); }
+    .detSub { font-size:13px; color:var(--muted); margin-bottom:16px; }
+    #detChi button { padding:9px 4px; font-size:14px; }
     .detTable { width:100%; border-collapse:collapse; font-size:13px; margin-top:6px; }
     .detTable td { padding:10px 2px; border-top:1px solid var(--border); vertical-align:top; }
     .detTable td.d { text-align:left; }
@@ -258,10 +265,15 @@
   </div><!-- /viewRiepilogo -->
 
   <div id="viewDettaglio" style="display:none">
+    <button class="backBtn" id="detBack">← Torna al riepilogo</button>
     <div class="card">
-      <button class="backBtn" id="detBack">← Torna al riepilogo</button>
       <div class="detTitle" id="detTitle">…</div>
       <div class="detSub" id="detSub"></div>
+      <div class="seg" id="detChi">
+        <button data-v="Insieme" class="on">Insieme</button>
+        <button data-v="Riccardo">Riccardo</button>
+        <button data-v="Roberta">Roberta</button>
+      </div>
       <table class="detTable" id="detTable"></table>
       <div id="detMsg" class="catEmpty"></div>
     </div>
@@ -787,7 +799,9 @@
     // Terza vista, raggiungibile solo cliccando una categoria nel riepilogo.
     // Mostra le singole spese (data, nota, importo) del periodo, della valuta e
     // della persona gia' selezionati sopra.
-    var detReq = 0; // token: solo l'ultima richiesta puo' renderizzare
+    var detReq = 0;    // token: solo l'ultima richiesta puo' renderizzare
+    var detCtx = null; // categoria + periodo + valuta fissati all'apertura
+    var detChi = 'Insieme';
 
     document.getElementById('catTable').addEventListener('click', function (ev) {
       var a = ev.target.closest('.catLink'); if (!a) return;
@@ -800,35 +814,53 @@
       window.scrollTo(0, 0);
     });
 
+    // Il filtro persona vive anche qui: dalla lista si passa da Insieme al
+    // singolo senza tornare indietro. Cambia solo la persona, non il periodo.
+    initSeg('detChi', function (v) { detChi = v; caricaDettaglio(); });
+
     function apriDettaglio(cat) {
       document.getElementById('viewRiepilogo').style.display = 'none';
       document.getElementById('viewDettaglio').style.display = '';
       window.scrollTo(0, 0);
 
-      // Fotografia dei filtri al momento del click: il rendering non deve mai
-      // rileggere le variabili correnti (potrebbero cambiare durante la fetch).
+      // Fotografia dei filtri al momento del click: da qui in poi il dettaglio
+      // vive di vita propria e non rilegge piu' le variabili del riepilogo.
+      var mm = (document.getElementById('riepMese').value || '').split('-');
+      detCtx = {
+        cat: cat,
+        valuta: riepC,
+        tipo: riepP === 'Annuale' ? 'annuale' : 'mensile',
+        anno: riepP === 'Annuale' ? document.getElementById('riepAnno').value : (mm[0] || ''),
+        mese: riepP === 'Annuale' ? '' : (parseInt(mm[1], 10) || '')
+      };
+
+      // Parte dalla stessa persona scelta nel riepilogo.
+      detChi = catChi;
+      [].forEach.call(document.getElementById('detChi').children, function (b) {
+        b.classList.toggle('on', b.getAttribute('data-v') === detChi);
+      });
+
+      document.getElementById('detTitle').textContent = cat;
+      caricaDettaglio();
+    }
+
+    function caricaDettaglio() {
+      if (!detCtx) return;
       var myReq = ++detReq;
-      var cReq = riepC, pReq = riepP, chiReq = catChi;
-      var simbReq = cReq === 'Euro' ? '€' : 'CHF';
+      var c = detCtx, chiReq = detChi;
+      var simbReq = c.valuta === 'Euro' ? '€' : 'CHF';
       function fmtReq(n) {
         return simbReq + ' ' + Math.abs(n).toLocaleString('it-IT',
           { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       }
 
-      var url = API + '?action=spese&conto=' + cReq
-        + '&tipo=' + (pReq === 'Annuale' ? 'annuale' : 'mensile')
+      var url = API + '?action=spese&conto=' + c.valuta + '&tipo=' + c.tipo
+        + '&anno=' + c.anno + (c.mese ? '&mese=' + c.mese : '')
         + '&persona=' + encodeURIComponent(chiReq)
-        + '&categoria=' + encodeURIComponent(cat);
-      if (pReq === 'Annuale') {
-        url += '&anno=' + document.getElementById('riepAnno').value;
-      } else {
-        var mm = (document.getElementById('riepMese').value || '').split('-');
-        url += '&anno=' + (mm[0] || '') + '&mese=' + (parseInt(mm[1], 10) || '');
-      }
+        + '&categoria=' + encodeURIComponent(c.cat);
 
-      document.getElementById('detTitle').textContent = cat;
       document.getElementById('detSub').textContent =
-        chiReq + ' · ' + pReq.toLowerCase() + ' · ' + cReq;
+        chiReq + ' · ' + c.tipo + ' · ' + c.valuta;
       document.getElementById('detTable').innerHTML = '';
       var m = document.getElementById('detMsg');
       m.textContent = 'Caricamento…';
@@ -838,11 +870,19 @@
         .then(function (j) {
           if (myReq !== detReq) return; // risposta superata da una piu' recente
           var d = j && j.spese;
-          if (!d) { m.textContent = 'Nessun dato.'; return; }
+          if (!d) {
+            // Il backend risponde ma senza questo endpoint: quasi sempre e' una
+            // pagina vecchia in cache che punta a una distribuzione precedente.
+            // Dirlo esplicitamente evita di scambiarlo per "non ci sono spese".
+            m.textContent = j && j.version
+              ? 'Backend ' + j.version + ' senza elenco spese: ricarica la pagina.'
+              : 'Nessun dato.';
+            return;
+          }
           var righe = d.righe || [];
           document.getElementById('detSub').textContent =
             chiReq + ' · ' + (d.periodo ? d.periodo.inizio + ' → ' + d.periodo.fine : '')
-            + ' · ' + cReq;
+            + ' · ' + c.valuta;
           if (!righe.length) {
             m.textContent = 'Nessuna spesa in questa categoria.';
             return;
