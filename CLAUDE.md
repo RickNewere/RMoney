@@ -12,7 +12,7 @@ Full system documentation (backend API, spreadsheet column logic, deployment got
 
 ## Structure of index.html
 
-A top toggle (`#topToggle`) switches between two views:
+A top toggle (`#topToggle`) switches between two views. A third view, `#viewDettaglio`, has **no button**: it is reachable only by clicking a category in the summary, and the top toggle always closes it.
 
 - `#viewInserisci` — the expense form (Persona, Conto, Data, Importo, Categoria, Nota, split checkbox) plus the "Debito condiviso" card.
 - `#viewRiepilogo` — read-only summary, all from `?action=riep` (period + currency chosen in-app):
@@ -22,6 +22,7 @@ A top toggle (`#topToggle`) switches between two views:
   - Bar chart, andamento line chart (annuale only), and the "Spese per categoria" section.
   - Chart **axis ticks carry no currency prefix** — adding `CHF ` made the labels overflow the card on phones. The symbol still appears in tooltips and in every text value via `riepFmt()`.
 - `renderCategorie()` draws "Spese per categoria" and is driven by `#catChi` (Insieme/Riccardo/Roberta). It re-renders from `riepData` (the cached last response) **without refetching**, filters out zero rows, sorts descending, and stacks both people's bars in the Insieme view. Canvas height is set dynamically from the row count.
+- `apriDettaglio(cat)` fills `#viewDettaglio` from `?action=spese`, listing the single expenses (date, note, amount, and who paid in the Insieme view) behind one category. It reuses the snapshot pattern described below for `caricaDebito()`: currency, period and `catChi` are captured at click time, so the list can never be labelled with filters the user changed while the request was in flight. This is the **only** part of the summary that refetches — everything else redraws from `riepData`.
 - `caricaRiepilogo()` guards against out-of-order responses with the `riepReq` token — rapidly switching period used to let a stale response win.
 - `caricaDebito()` needs the **same** guard (`debitoReq`) plus something more: it snapshots `persona`/`conto` into locals when the request starts and renders only from those. Reading the globals in the `.then` was a real bug — switching tabs quickly showed one sheet's numbers under another sheet's labels and currency symbol, which is what made a user distrust the debt figure. For the same reason there is deliberately **no** `fmtImporto()`/`simbolo()`/`altraPersona()` helper here any more: any helper that reads the current globals re-creates the bug the moment someone calls it from a response handler. The "Saldato" button stays disabled until the figures on screen belong to the selected tab, so it can never be pressed against stale numbers.
 - If the `salda` POST fails at the network level, the handler re-queries `?action=debito` and reports whether the sheet was actually cleared. "Errore di rete" alone left the user unable to tell whether the write had landed.

@@ -109,6 +109,17 @@
     .catTable .sub { display:block; font-size:10px; font-weight:500; color:var(--muted); margin-top:2px; }
     .catTable tr.tot td { border-top:2px solid var(--border); font-weight:800; font-size:13px; }
     .catEmpty { text-align:center; color:var(--muted); font-size:13px; padding:18px 0; }
+    .catLink { color:var(--accent); text-decoration:underline; cursor:pointer; }
+    .backBtn { background:transparent; border:none; color:var(--accent); font-size:15px; font-weight:700; padding:0 0 12px; }
+    .detTitle { font-size:20px; font-weight:800; margin:0 0 4px; }
+    .detSub { font-size:13px; color:var(--muted); }
+    .detTable { width:100%; border-collapse:collapse; font-size:13px; margin-top:6px; }
+    .detTable td { padding:10px 2px; border-top:1px solid var(--border); vertical-align:top; }
+    .detTable td.d { text-align:left; }
+    .detTable td.v { text-align:right; font-weight:800; white-space:nowrap; padding-left:10px; }
+    .detTable .nota { display:block; font-size:12px; color:var(--muted); margin-top:3px; }
+    .detTable .chi { display:inline-block; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.3px; color:var(--muted); margin-left:6px; }
+    .detTable tr.tot td { border-top:2px solid var(--border); font-weight:800; font-size:14px; }
   </style>
 </head>
 <body>
@@ -245,6 +256,16 @@
 
     <div id="riepMsg"></div>
   </div><!-- /viewRiepilogo -->
+
+  <div id="viewDettaglio" style="display:none">
+    <div class="card">
+      <button class="backBtn" id="detBack">← Torna al riepilogo</button>
+      <div class="detTitle" id="detTitle">…</div>
+      <div class="detSub" id="detSub"></div>
+      <table class="detTable" id="detTable"></table>
+      <div id="detMsg" class="catEmpty"></div>
+    </div>
+  </div><!-- /viewDettaglio -->
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script>
@@ -493,6 +514,10 @@
         ora.getFullYear() + '-' + String(ora.getMonth() + 1).padStart(2, '0');
     })();
 
+    function esc(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
     function riepSimbolo() { return riepC === 'Euro' ? '€' : 'CHF'; }
     function riepFmt(n) {
       var s = Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -515,6 +540,9 @@
       [].forEach.call(this.children, function (c) { c.classList.remove('on'); });
       b.classList.add('on');
       var v = b.getAttribute('data-v');
+      // Il dettaglio e' una terza vista senza pulsante: si chiude sempre quando
+      // si usa il selettore in cima.
+      document.getElementById('viewDettaglio').style.display = 'none';
       document.getElementById('viewInserisci').style.display = v === 'inserisci' ? '' : 'none';
       document.getElementById('viewRiepilogo').style.display = v === 'riepilogo' ? '' : 'none';
       if (v === 'riepilogo') caricaRiepilogo();
@@ -744,13 +772,99 @@
         var sub = insieme
           ? '<span class="sub">Riccardo ' + riepFmt(r.ricc) + ' · Roberta ' + riepFmt(r.rob) + '</span>'
           : '';
-        html += '<tr><td class="c">' + r.cat + sub + '</td>'
+        html += '<tr><td class="c">'
+          + '<span class="catLink" data-cat="' + esc(r.cat) + '">' + esc(r.cat) + '</span>'
+          + sub + '</td>'
           + '<td class="v">' + riepFmt(v) + '</td>'
           + '<td class="p">' + pct + '%</td></tr>';
       });
       html += '<tr class="tot"><td class="c">Totale</td>'
         + '<td class="v">' + riepFmt(totale) + '</td><td class="p"></td></tr>';
       tbl.innerHTML = html;
+    }
+
+    // ==================== Dettaglio spese di una categoria ====================
+    // Terza vista, raggiungibile solo cliccando una categoria nel riepilogo.
+    // Mostra le singole spese (data, nota, importo) del periodo, della valuta e
+    // della persona gia' selezionati sopra.
+    var detReq = 0; // token: solo l'ultima richiesta puo' renderizzare
+
+    document.getElementById('catTable').addEventListener('click', function (ev) {
+      var a = ev.target.closest('.catLink'); if (!a) return;
+      apriDettaglio(a.getAttribute('data-cat'));
+    });
+
+    document.getElementById('detBack').addEventListener('click', function () {
+      document.getElementById('viewDettaglio').style.display = 'none';
+      document.getElementById('viewRiepilogo').style.display = '';
+      window.scrollTo(0, 0);
+    });
+
+    function apriDettaglio(cat) {
+      document.getElementById('viewRiepilogo').style.display = 'none';
+      document.getElementById('viewDettaglio').style.display = '';
+      window.scrollTo(0, 0);
+
+      // Fotografia dei filtri al momento del click: il rendering non deve mai
+      // rileggere le variabili correnti (potrebbero cambiare durante la fetch).
+      var myReq = ++detReq;
+      var cReq = riepC, pReq = riepP, chiReq = catChi;
+      var simbReq = cReq === 'Euro' ? '€' : 'CHF';
+      function fmtReq(n) {
+        return simbReq + ' ' + Math.abs(n).toLocaleString('it-IT',
+          { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      }
+
+      var url = API + '?action=spese&conto=' + cReq
+        + '&tipo=' + (pReq === 'Annuale' ? 'annuale' : 'mensile')
+        + '&persona=' + encodeURIComponent(chiReq)
+        + '&categoria=' + encodeURIComponent(cat);
+      if (pReq === 'Annuale') {
+        url += '&anno=' + document.getElementById('riepAnno').value;
+      } else {
+        var mm = (document.getElementById('riepMese').value || '').split('-');
+        url += '&anno=' + (mm[0] || '') + '&mese=' + (parseInt(mm[1], 10) || '');
+      }
+
+      document.getElementById('detTitle').textContent = cat;
+      document.getElementById('detSub').textContent =
+        chiReq + ' · ' + pReq.toLowerCase() + ' · ' + cReq;
+      document.getElementById('detTable').innerHTML = '';
+      var m = document.getElementById('detMsg');
+      m.textContent = 'Caricamento…';
+
+      fetch(url)
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (myReq !== detReq) return; // risposta superata da una piu' recente
+          var d = j && j.spese;
+          if (!d) { m.textContent = 'Nessun dato.'; return; }
+          var righe = d.righe || [];
+          document.getElementById('detSub').textContent =
+            chiReq + ' · ' + (d.periodo ? d.periodo.inizio + ' → ' + d.periodo.fine : '')
+            + ' · ' + cReq;
+          if (!righe.length) {
+            m.textContent = 'Nessuna spesa in questa categoria.';
+            return;
+          }
+          m.textContent = '';
+          var html = '';
+          righe.forEach(function (r) {
+            // Nella vista Insieme serve sapere di chi e' la spesa.
+            var chi = chiReq === 'Insieme'
+              ? '<span class="chi">' + esc(r.persona) + '</span>' : '';
+            var nota = r.nota ? '<span class="nota">' + esc(r.nota) + '</span>' : '';
+            html += '<tr><td class="d">' + esc(r.data) + chi + nota + '</td>'
+              + '<td class="v">' + fmtReq(r.importo) + '</td></tr>';
+          });
+          html += '<tr class="tot"><td class="d">Totale · ' + righe.length + ' spese</td>'
+            + '<td class="v">' + fmtReq(d.totale || 0) + '</td></tr>';
+          document.getElementById('detTable').innerHTML = html;
+        })
+        .catch(function (e) {
+          if (myReq !== detReq) return;
+          m.textContent = 'Errore di rete: ' + e.message;
+        });
     }
   </script>
 </body>
