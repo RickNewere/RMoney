@@ -127,6 +127,13 @@
     .detTable .nota { display:block; font-size:12px; color:var(--muted); margin-top:3px; }
     .detTable .chi { display:inline-block; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.3px; color:var(--muted); margin-left:6px; }
     .detTable tr.tot td { border-top:2px solid var(--border); font-weight:800; font-size:14px; }
+    .detTable td.x { width:34px; text-align:right; padding-left:6px; }
+    .delBtn {
+      width:30px; height:30px; border-radius:9px; border:1px solid var(--border);
+      background:transparent; color:#dc2626; font-size:16px; font-weight:800; line-height:1; padding:0;
+    }
+    .delBtn:disabled { opacity:.4; }
+    .detHint { font-size:11px; color:var(--muted); margin-top:10px; line-height:1.5; }
   </style>
 </head>
 <body>
@@ -276,6 +283,7 @@
       </div>
       <table class="detTable" id="detTable"></table>
       <div id="detMsg" class="catEmpty"></div>
+      <div class="detHint" id="detHint"></div>
     </div>
   </div><!-- /viewDettaglio -->
 
@@ -802,6 +810,7 @@
     var detReq = 0;    // token: solo l'ultima richiesta puo' renderizzare
     var detCtx = null; // categoria + periodo + valuta fissati all'apertura
     var detChi = 'Insieme';
+    var detDirty = false; // true dopo una cancellazione: il riepilogo va rifatto
 
     document.getElementById('catTable').addEventListener('click', function (ev) {
       var a = ev.target.closest('.catLink'); if (!a) return;
@@ -812,6 +821,55 @@
       document.getElementById('viewDettaglio').style.display = 'none';
       document.getElementById('viewRiepilogo').style.display = '';
       window.scrollTo(0, 0);
+      // Dopo una cancellazione i totali del riepilogo sono vecchi: vanno
+      // riletti, altrimenti si torna indietro e si vede ancora la spesa tolta.
+      if (detDirty) { detDirty = false; caricaRiepilogo(); }
+    });
+
+    // Eliminazione: disponibile SOLO da questa schermata, mai dal riepilogo o
+    // dal form. Svuota la riga sul foglio lasciandola al suo posto.
+    document.getElementById('detTable').addEventListener('click', function (ev) {
+      var b = ev.target.closest('.delBtn'); if (!b) return;
+      var riga = b.getAttribute('data-riga');
+      var nota = b.getAttribute('data-nota');
+      var quando = b.getAttribute('data-data');
+      var quanto = parseFloat(b.getAttribute('data-importo'));
+      var simb = detCtx && detCtx.valuta === 'Euro' ? '€' : 'CHF';
+
+      var ok = confirm('Eliminare questa spesa?\n\n'
+        + quando + '\n' + simb + ' ' + quanto.toFixed(2).replace('.', ',')
+        + (nota ? '\n' + nota : '') + '\n\n'
+        + 'La riga ' + riga + ' del foglio resta al suo posto, ma vuota.');
+      if (!ok) return;
+
+      var m = document.getElementById('detMsg');
+      b.disabled = true;
+      m.textContent = 'Eliminazione…';
+      fetch(API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          op: 'elimina',
+          gid: b.getAttribute('data-gid'),
+          riga: riga,
+          // Il backend rifiuta se la riga nel frattempo e' cambiata.
+          atteso: { importo: quanto, nota: nota, categoria: detCtx ? detCtx.cat : '' }
+        })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j && j.ok) {
+            detDirty = true;
+            caricaDettaglio(); // rilegge la lista e il totale dal foglio
+          } else {
+            b.disabled = false;
+            m.textContent = 'Errore: ' + ((j && j.error) || 'sconosciuto');
+          }
+        })
+        .catch(function (e) {
+          b.disabled = false;
+          m.textContent = 'Errore di rete: ' + e.message;
+        });
     });
 
     // Il filtro persona vive anche qui: dalla lista si passa da Insieme al
@@ -862,6 +920,7 @@
       document.getElementById('detSub').textContent =
         chiReq + ' · ' + c.tipo + ' · ' + c.valuta;
       document.getElementById('detTable').innerHTML = '';
+      document.getElementById('detHint').textContent = '';
       var m = document.getElementById('detMsg');
       m.textContent = 'Caricamento…';
 
@@ -894,12 +953,21 @@
             var chi = chiReq === 'Insieme'
               ? '<span class="chi">' + esc(r.persona) + '</span>' : '';
             var nota = r.nota ? '<span class="nota">' + esc(r.nota) + '</span>' : '';
+            // I dati della riga viaggiano con il bottone: servono al backend
+            // per ricontrollare di star svuotando davvero questa spesa.
             html += '<tr><td class="d">' + esc(r.data) + chi + nota + '</td>'
-              + '<td class="v">' + fmtReq(r.importo) + '</td></tr>';
+              + '<td class="v">' + fmtReq(r.importo) + '</td>'
+              + '<td class="x"><button class="delBtn" title="Elimina questa spesa"'
+              + ' data-gid="' + r.gid + '" data-riga="' + r.riga + '"'
+              + ' data-importo="' + r.importo + '"'
+              + ' data-nota="' + esc(r.nota || '') + '"'
+              + ' data-data="' + esc(r.data) + '">×</button></td></tr>';
           });
           html += '<tr class="tot"><td class="d">Totale · ' + righe.length + ' spese</td>'
-            + '<td class="v">' + fmtReq(d.totale || 0) + '</td></tr>';
+            + '<td class="v">' + fmtReq(d.totale || 0) + '</td><td class="x"></td></tr>';
           document.getElementById('detTable').innerHTML = html;
+          document.getElementById('detHint').textContent =
+            'La × elimina la spesa dal foglio: la riga resta al suo posto, vuota.';
         })
         .catch(function (e) {
           if (myReq !== detReq) return;
