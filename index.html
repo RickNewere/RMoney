@@ -323,15 +323,24 @@
       b.textContent = segno ? '✓' : '';
     });
 
-    function caricaCategorie() {
+    var catReq = 0; // token: solo l'ultima richiesta puo' scrivere nella select
+
+    function caricaCategorie(tentativo) {
+      tentativo = tentativo || 0;
       var sel = document.getElementById('categoria');
+      var mio = ++catReq;
+      var mioGid = gid();
       // value="" cosi' un invio prima del caricamento non scrive la stringa
       // "Caricamento…" come categoria nel foglio.
-      sel.innerHTML = '<option value="">Caricamento…</option>';
-      fetch(API + '?action=categorie&gid=' + gid())
+      if (!tentativo) sel.innerHTML = '<option value="">Caricamento…</option>';
+      fetch(API + '?action=categorie&gid=' + mioGid)
         .then(function (r) { return r.json(); })
         .then(function (j) {
-          var cats = (j && j.categorie) || [];
+          // Una risposta senza ok non e' un elenco vuoto: e' un errore, e va
+          // trattata come tale o la select resta muta senza spiegazione.
+          if (!j || !j.ok) throw new Error('risposta non valida');
+          if (mio !== catReq) return;
+          var cats = j.categorie || [];
           sel.innerHTML = '';
           if (!cats.length) { sel.innerHTML = '<option value="">(nessuna categoria)</option>'; return; }
           cats.forEach(function (c) {
@@ -339,9 +348,28 @@
             o.value = c; o.textContent = c; sel.appendChild(o);
           });
         })
-        .catch(function () { sel.innerHTML = '<option value="">(errore categorie)</option>'; });
+        .catch(function () {
+          if (mio !== catReq) return;
+          // Apps Script ogni tanto risponde con una pagina HTML al posto del
+          // JSON. E' transitorio e sparisce al tentativo dopo, ma senza ritenti
+          // basta quell'unico inciampo per lasciare il form inutilizzabile
+          // finche' non si ricarica la pagina a mano.
+          if (tentativo < 2) {
+            setTimeout(function () { caricaCategorie(tentativo + 1); }, 700 * (tentativo + 1));
+            return;
+          }
+          sel.innerHTML = '<option value="">(errore, tocca per riprovare)</option>';
+        });
     }
     caricaCategorie();
+
+    // Rete tornata, o inciampo passeggero: toccare la select riprova.
+    document.getElementById('categoria').addEventListener('focus', function () {
+      var o = this.options[0];
+      if (this.options.length === 1 && o && o.value === '' && /errore/.test(o.textContent)) {
+        caricaCategorie();
+      }
+    });
 
     // ---- Debito condiviso (righe con la spunta split) ----
     // Nessun helper che legga persona/conto globali: il rendering deve usare
