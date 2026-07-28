@@ -11,10 +11,14 @@ export async function widgetTaskHandler(props) {
 
   if (widgetAction === 'WIDGET_DELETED') return;
 
+  // La larghezza serve al widget per scegliere fra la frase intera e quella
+  // corta: a 2x2 "Riccardo deve a Roberta" non ci sta.
+  const larghezza = widgetInfo.width || 0;
+
   const disegna = (dati) =>
     renderWidget({
-      light: <DebitoWidget dati={dati} tema="light" />,
-      dark: <DebitoWidget dati={dati} tema="dark" />,
+      light: <DebitoWidget dati={dati} tema="light" larghezza={larghezza} />,
+      dark: <DebitoWidget dati={dati} tema="dark" larghezza={larghezza} />,
     });
 
   switch (widgetAction) {

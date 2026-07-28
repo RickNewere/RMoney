@@ -14,6 +14,11 @@ const API_CONFIG_URL = 'https://ricknewere.github.io/RMoney/api.json';
 const CACHE_KEY = 'DebitoWidget:ultimo';
 const TIMEOUT_MS = 12000;
 
+// Versione del formato salvato in cache. Va alzata ogni volta che cambiano i
+// campi di una voce: senza, dopo un aggiornamento dell'app il widget ripescava
+// una voce vecchia priva dei campi nuovi e finiva per disegnare caselle vuote.
+const CACHE_V = 2;
+
 // The debt is computed per currency: the two sheets of the same currency are
 // compared against each other, euro and franchi never mix.
 const COPPIE = [
@@ -26,7 +31,7 @@ const COPPIE = [
 const PERSONA = 'Riccardo';
 const PARTNER = 'Roberta';
 
-async function chiedi(url) {
+async function unaVolta(url) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
@@ -36,6 +41,22 @@ async function chiedi(url) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Apps Script ogni tanto risponde con una pagina HTML al posto del JSON, e il
+// tentativo successivo va a buon fine. Senza ritenti quell'unico inciampo
+// lascerebbe il widget fermo sul dato vecchio per mezz'ora.
+async function chiedi(url) {
+  let ultimo;
+  for (let i = 0; i < 3; i++) {
+    try {
+      return await unaVolta(url);
+    } catch (e) {
+      ultimo = e;
+      if (i < 2) await new Promise((r) => setTimeout(r, 700 * (i + 1)));
+    }
+  }
+  throw ultimo;
 }
 
 async function risolviApi() {
@@ -66,9 +87,10 @@ async function leggiCoppia(api, c) {
     simbolo: c.simbolo,
     importo: Math.abs(netto),
     debitore: debitore,
-    // Frase intera: "Riccardo deve" da solo non dice a chi, e nel widget lo
-    // spazio in orizzontale c'e'.
+    // Due versioni: quale usare lo decide il widget in base alla larghezza
+    // effettiva, perche' in un 2x2 la frase intera non ci sta.
     frase: pari ? 'siete in pari' : debitore + ' deve a ' + creditore,
+    fraseCorta: pari ? 'in pari' : debitore + ' deve',
   };
 }
 
@@ -79,7 +101,7 @@ export async function leggiDebito() {
     const api = await risolviApi();
     const voci = [];
     for (const c of COPPIE) voci.push(await leggiCoppia(api, c));
-    const dati = { voci: voci, aggiornato: Date.now(), vecchio: false };
+    const dati = { v: CACHE_V, voci: voci, aggiornato: Date.now(), vecchio: false };
     await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(dati));
     return dati;
   } catch (e) {
@@ -87,8 +109,12 @@ export async function leggiDebito() {
       const cache = await AsyncStorage.getItem(CACHE_KEY);
       if (cache) {
         const dati = JSON.parse(cache);
-        dati.vecchio = true;
-        return dati;
+        // Una cache di un formato precedente si scarta: meglio lo stato vuoto,
+        // che invita a toccare, di una schermata disegnata a meta'.
+        if (dati && dati.v === CACHE_V && dati.voci) {
+          dati.vecchio = true;
+          return dati;
+        }
       }
     } catch (e2) {
       // cache illeggibile: si mostra lo stato vuoto
