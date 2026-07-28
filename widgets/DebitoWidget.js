@@ -51,14 +51,24 @@ function Blocco({ voce, p, largo }) {
         marginTop: 5,
       }}
     >
-      <TextWidget
-        text={voce.simbolo}
-        style={{ fontSize: 9, fontWeight: '700', color: p.attenuato }}
-      />
-      <TextWidget
-        text={formattaImporto(voce.importo)}
-        style={{ fontSize: 18, fontWeight: '700', color: coloreDi(voce.debitore, p) }}
-      />
+      {/* Simbolo e cifra sulla stessa riga, come si scrive un importo. Sopra
+          stava su una riga sua e mangiava altezza, che nel 2x2 e' preziosa. */}
+      <FlexWidget
+        style={{
+          width: 'match_parent',
+          flexDirection: 'row',
+          alignItems: 'center',
+        }}
+      >
+        <TextWidget
+          text={voce.simbolo}
+          style={{ fontSize: 10, fontWeight: '700', color: p.attenuato, marginRight: 5 }}
+        />
+        <TextWidget
+          text={formattaImporto(voce.importo)}
+          style={{ fontSize: 17, fontWeight: '700', color: coloreDi(voce.debitore, p) }}
+        />
+      </FlexWidget>
       <TextWidget
         text={largo ? voce.frase : voce.fraseCorta}
         style={{ fontSize: 9, color: p.attenuato }}
