@@ -22,17 +22,29 @@ const SPIA_SCRITTURE = `
 (function () {
   if (window.__rmoneySpia) return;
   window.__rmoneySpia = true;
+  function avvisa(testo) {
+    // console.log finisce in logcat come messaggio chromium: e' l'unico modo
+    // di vedere cosa succede dentro la WebView in una build release.
+    try { console.log('[RMoneySpia] ' + testo); } catch (e) {}
+  }
+  function manda(msg) {
+    try { window.ReactNativeWebView.postMessage(msg); avvisa('inviato ' + msg); }
+    catch (e) { avvisa('postMessage fallito: ' + e); }
+  }
   var originale = window.fetch;
   window.fetch = function (risorsa, opzioni) {
     var url = typeof risorsa === 'string' ? risorsa : (risorsa && risorsa.url) || '';
     var metodo = ((opzioni && opzioni.method) || 'GET').toUpperCase();
     return originale.apply(this, arguments).then(function (res) {
-      if (metodo === 'POST' && url.indexOf('/exec') > 0 && res.ok) {
-        try { window.ReactNativeWebView.postMessage('foglio-cambiato'); } catch (e) {}
+      if (metodo === 'POST' && url.indexOf('/exec') > 0) {
+        avvisa('POST intercettata, ok=' + res.ok);
+        if (res.ok) manda('foglio-cambiato');
       }
       return res;
     });
   };
+  avvisa('installata, fetch avvolta');
+  manda('spia-pronta');
 })();
 true;
 `;
@@ -43,23 +55,28 @@ export default function App() {
   const webRef = useRef(null);
   const [loading, setLoading] = useState(true);
 
-  const aggiornaWidget = useCallback(function () {
+  const aggiornaWidget = useCallback(function (motivo) {
+    console.log('[RMoney] aggiorno widget: ' + motivo);
     requestWidgetUpdate({
       widgetName: NOME_WIDGET,
       renderWidget: async (info) => disegnaDebito(await leggiDebito(), info),
       // Nessun widget sulla home: non c'e' niente da fare, e non e' un errore.
-      widgetNotFound: () => {},
-    }).catch(function () {
-      // Un aggiornamento mancato non deve disturbare l'uso dell'app.
-    });
+      widgetNotFound: () => console.log('[RMoney] nessun widget sulla home'),
+    })
+      .then(function () { console.log('[RMoney] widget aggiornato (' + motivo + ')'); })
+      .catch(function (e) {
+        // Un aggiornamento mancato non deve disturbare l'uso dell'app.
+        console.log('[RMoney] aggiornamento fallito: ' + e);
+      });
   }, []);
 
   useEffect(function () {
     // All'avvio, e ogni volta che l'app viene lasciata: se l'utente ha appena
     // inserito una spesa e torna alla home, il widget e' gia' aggiornato.
-    aggiornaWidget();
+    aggiornaWidget('avvio');
     const sub = AppState.addEventListener('change', function (stato) {
-      if (stato === 'background' || stato === 'inactive') aggiornaWidget();
+      console.log('[RMoney] AppState -> ' + stato);
+      if (stato === 'background' || stato === 'inactive') aggiornaWidget('uscita');
     });
     return function () { sub.remove(); };
   }, [aggiornaWidget]);
@@ -78,9 +95,15 @@ export default function App() {
         pullToRefreshEnabled
         onLoadEnd={() => setLoading(false)}
         startInLoadingState={false}
+        // Due iniezioni apposta: quella "before" mette la spia prima che la
+        // pagina esegua il proprio script, l'altra la rimette dopo un eventuale
+        // ricaricamento. La guardia __rmoneySpia rende la seconda innocua.
+        injectedJavaScriptBeforeContentLoaded={SPIA_SCRITTURE}
         injectedJavaScript={SPIA_SCRITTURE}
         onMessage={(e) => {
-          if (e.nativeEvent.data === 'foglio-cambiato') aggiornaWidget();
+          const msg = e.nativeEvent.data;
+          console.log('[RMoney] messaggio dalla pagina: ' + msg);
+          if (msg === 'foglio-cambiato') aggiornaWidget('scrittura sul foglio');
         }}
       />
       {loading && (
