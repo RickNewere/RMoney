@@ -1,19 +1,68 @@
-import React, { useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   SafeAreaView, View, StyleSheet, ActivityIndicator,
-  StatusBar, useColorScheme,
+  StatusBar, useColorScheme, AppState,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
+import { requestWidgetUpdate } from 'react-native-android-widget';
+
+import { disegnaDebito, NOME_WIDGET } from './widgets/disegna';
+import { leggiDebito } from './widgets/debitoData';
 
 // The Android app is a thin shell around the live web app, so both clients
 // stay identical and future web updates require no APK rebuild.
 const SITE_URL = 'https://ricknewere.github.io/RMoney/';
+
+// Runs inside the WebView. Wraps fetch so that a successful POST to the Apps
+// Script endpoint (a new expense, a delete, a settle) reports back to the app.
+// Android's own widget refresh is capped at once every 30 minutes and is best
+// effort on top of that, so without this the widget would keep showing the old
+// balance right after the user changed it.
+const SPIA_SCRITTURE = `
+(function () {
+  if (window.__rmoneySpia) return;
+  window.__rmoneySpia = true;
+  var originale = window.fetch;
+  window.fetch = function (risorsa, opzioni) {
+    var url = typeof risorsa === 'string' ? risorsa : (risorsa && risorsa.url) || '';
+    var metodo = ((opzioni && opzioni.method) || 'GET').toUpperCase();
+    return originale.apply(this, arguments).then(function (res) {
+      if (metodo === 'POST' && url.indexOf('/exec') > 0 && res.ok) {
+        try { window.ReactNativeWebView.postMessage('foglio-cambiato'); } catch (e) {}
+      }
+      return res;
+    });
+  };
+})();
+true;
+`;
 
 export default function App() {
   const scheme = useColorScheme();
   const bg = scheme === 'dark' ? '#0f1115' : '#f2f4f7';
   const webRef = useRef(null);
   const [loading, setLoading] = useState(true);
+
+  const aggiornaWidget = useCallback(function () {
+    requestWidgetUpdate({
+      widgetName: NOME_WIDGET,
+      renderWidget: async (info) => disegnaDebito(await leggiDebito(), info),
+      // Nessun widget sulla home: non c'e' niente da fare, e non e' un errore.
+      widgetNotFound: () => {},
+    }).catch(function () {
+      // Un aggiornamento mancato non deve disturbare l'uso dell'app.
+    });
+  }, []);
+
+  useEffect(function () {
+    // All'avvio, e ogni volta che l'app viene lasciata: se l'utente ha appena
+    // inserito una spesa e torna alla home, il widget e' gia' aggiornato.
+    aggiornaWidget();
+    const sub = AppState.addEventListener('change', function (stato) {
+      if (stato === 'background' || stato === 'inactive') aggiornaWidget();
+    });
+    return function () { sub.remove(); };
+  }, [aggiornaWidget]);
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: bg }]}>
@@ -29,6 +78,10 @@ export default function App() {
         pullToRefreshEnabled
         onLoadEnd={() => setLoading(false)}
         startInLoadingState={false}
+        injectedJavaScript={SPIA_SCRITTURE}
+        onMessage={(e) => {
+          if (e.nativeEvent.data === 'foglio-cambiato') aggiornaWidget();
+        }}
       />
       {loading && (
         <View style={[styles.loader, { backgroundColor: bg }]}>

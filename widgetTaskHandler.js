@@ -1,5 +1,4 @@
-import React from 'react';
-import { DebitoWidget } from './widgets/DebitoWidget';
+import { disegnaDebito, NOME_WIDGET } from './widgets/disegna';
 import { leggiDebito } from './widgets/debitoData';
 
 // Android calls this outside the app, in a headless JS task. Every branch has
@@ -7,19 +6,8 @@ import { leggiDebito } from './widgets/debitoData';
 export async function widgetTaskHandler(props) {
   const { widgetInfo, widgetAction, renderWidget } = props;
 
-  if (widgetInfo.widgetName !== 'Debito') return;
-
+  if (widgetInfo.widgetName !== NOME_WIDGET) return;
   if (widgetAction === 'WIDGET_DELETED') return;
-
-  // La larghezza serve al widget per scegliere fra la frase intera e quella
-  // corta: a 2x2 "Riccardo deve a Roberta" non ci sta.
-  const larghezza = widgetInfo.width || 0;
-
-  const disegna = (dati) =>
-    renderWidget({
-      light: <DebitoWidget dati={dati} tema="light" larghezza={larghezza} />,
-      dark: <DebitoWidget dati={dati} tema="dark" larghezza={larghezza} />,
-    });
 
   switch (widgetAction) {
     case 'WIDGET_ADDED':
@@ -28,7 +16,7 @@ export async function widgetTaskHandler(props) {
     case 'WIDGET_CLICK':
       // leggiDebito() non lancia mai: se la rete manca ritorna l'ultimo valore
       // salvato, marcato come vecchio.
-      disegna(await leggiDebito());
+      renderWidget(disegnaDebito(await leggiDebito(), widgetInfo));
       break;
     default:
       break;
