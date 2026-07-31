@@ -31,9 +31,9 @@ const COPPIE = [
 const PERSONA = 'Riccardo';
 const PARTNER = 'Roberta';
 
-async function unaVolta(url) {
+async function unaVolta(url, timeoutMs) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs || TIMEOUT_MS);
   try {
     const res = await fetch(url, { signal: ctrl.signal });
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -59,9 +59,12 @@ async function chiedi(url) {
   throw ultimo;
 }
 
+// Un solo tentativo, con timeout corto: questa lettura ha gia' un ripiego
+// buono (API_URL), quindi insistere qui aggiungerebbe solo attesa prima di
+// arrivare ai dati veri.
 async function risolviApi() {
   try {
-    const j = await chiedi(API_CONFIG_URL + '?t=' + Date.now());
+    const j = await unaVolta(API_CONFIG_URL + '?t=' + Date.now(), 5000);
     if (j && typeof j.exec === 'string' && j.exec.indexOf('/exec') > 0) return j.exec;
   } catch (e) {
     // offline, or the file is not published: the baked in URL still works as
@@ -99,8 +102,10 @@ async function leggiCoppia(api, c) {
 export async function leggiDebito() {
   try {
     const api = await risolviApi();
-    const voci = [];
-    for (const c of COPPIE) voci.push(await leggiCoppia(api, c));
+    // In parallelo: le due valute sono indipendenti e Promise.all conserva
+    // l'ordine. In sequenza il widget ci metteva il doppio, e su un tocco
+    // "aggiorna" l'attesa si vede.
+    const voci = await Promise.all(COPPIE.map((c) => leggiCoppia(api, c)));
     const dati = { v: CACHE_V, voci: voci, aggiornato: Date.now(), vecchio: false };
     await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(dati));
     return dati;
@@ -123,11 +128,17 @@ export async function leggiDebito() {
   }
 }
 
-// Formato italiano, con il punto per le migliaia: 1165.86 -> "1.165,86".
-// Senza separatore un importo a quattro cifre nel widget si legge male.
+// Stesso formato della web app, cifra per cifra. In italiano il punto delle
+// migliaia compare solo da 10.000 in su (CLDR usa minimumGroupingDigits=2), ed
+// e' quello che fa toLocaleString('it-IT') nell'app: 1165.86 -> "1165,86",
+// 12345.67 -> "12.345,67". La regola e' scritta a mano invece di usare
+// toLocaleString perche' qui gira in un task headless, dove non si puo' dare
+// per scontato il supporto Intl completo.
 export function formattaImporto(n) {
   const parti = Number(n).toFixed(2).split('.');
-  const intera = parti[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  const intera = parti[0].length >= 5
+    ? parti[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.')
+    : parti[0];
   return intera + ',' + parti[1];
 }
 
