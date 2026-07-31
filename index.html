@@ -391,7 +391,7 @@
       var altraReq = pReq === 'Riccardo' ? 'Roberta' : 'Riccardo';
       var simbReq = cReq === 'Euro' ? '€' : 'CHF';
       function fmtReq(n) {
-        return simbReq + ' ' + (Math.round(n * 100) / 100).toFixed(2).replace('.', ',');
+        return fmtImporto(n, simbReq);
       }
 
       foglioLbl.textContent = altraReq + ' deve a ' + pReq;
@@ -567,9 +567,19 @@
         .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
     function riepSimbolo() { return riepC === 'Euro' ? '€' : 'CHF'; }
+
+    // Un solo formato per gli importi in tutta l'app. Prima la card del debito e
+    // la conferma di eliminazione ne usavano uno proprio, senza separatore delle
+    // migliaia, quindi lo stesso numero si leggeva "1165,86" li' e "1.165,86"
+    // nel riepilogo e nel dettaglio.
+    function fmtImporto(n, simb) {
+      var s = Math.abs(n).toLocaleString('it-IT',
+        { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return (simb ? simb + ' ' : '') + s;
+    }
+
     function riepFmt(n) {
-      var s = Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      return (n < 0 ? '-' : '') + riepSimbolo() + ' ' + s;
+      return (n < 0 ? '-' : '') + fmtImporto(n, riepSimbolo());
     }
     function chartTextColor() {
       return getComputedStyle(document.body).getPropertyValue('--text').trim() || '#333';
@@ -872,7 +882,7 @@
       var simb = detCtx && detCtx.valuta === 'Euro' ? '€' : 'CHF';
 
       var ok = confirm('Eliminare questa spesa?\n\n'
-        + quando + '\n' + simb + ' ' + quanto.toFixed(2).replace('.', ',')
+        + quando + '\n' + fmtImporto(quanto, simb)
         + (nota ? '\n' + nota : '') + '\n\n'
         + 'La riga ' + riga + ' del foglio resta al suo posto, ma vuota.');
       if (!ok) return;
@@ -943,8 +953,7 @@
       var c = detCtx, chiReq = detChi;
       var simbReq = c.valuta === 'Euro' ? '€' : 'CHF';
       function fmtReq(n) {
-        return simbReq + ' ' + Math.abs(n).toLocaleString('it-IT',
-          { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        return fmtImporto(n, simbReq);
       }
 
       var url = API + '?action=spese&conto=' + c.valuta + '&tipo=' + c.tipo
