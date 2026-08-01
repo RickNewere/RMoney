@@ -31,7 +31,7 @@ const COPPIE = [
 const PERSONA = 'Riccardo';
 const PARTNER = 'Roberta';
 
-async function unaVolta(url, timeoutMs) {
+export async function unaVolta(url, timeoutMs) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs || TIMEOUT_MS);
   try {
@@ -46,7 +46,7 @@ async function unaVolta(url, timeoutMs) {
 // Apps Script ogni tanto risponde con una pagina HTML al posto del JSON, e il
 // tentativo successivo va a buon fine. Senza ritenti quell'unico inciampo
 // lascerebbe il widget fermo sul dato vecchio per mezz'ora.
-async function chiedi(url) {
+export async function chiedi(url) {
   let ultimo;
   for (let i = 0; i < 3; i++) {
     try {
@@ -62,7 +62,7 @@ async function chiedi(url) {
 // Un solo tentativo, con timeout corto: questa lettura ha gia' un ripiego
 // buono (API_URL), quindi insistere qui aggiungerebbe solo attesa prima di
 // arrivare ai dati veri.
-async function risolviApi() {
+export async function risolviApi() {
   try {
     const j = await unaVolta(API_CONFIG_URL + '?t=' + Date.now(), 5000);
     if (j && typeof j.exec === 'string' && j.exec.indexOf('/exec') > 0) return j.exec;

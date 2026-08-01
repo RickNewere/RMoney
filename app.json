@@ -38,6 +38,15 @@
               "minHeight": "110dp",
               "resizeMode": "horizontal|vertical",
               "updatePeriodMillis": 1800000
+            },
+            {
+              "name": "Riepilogo",
+              "label": "RMoney · debito e mese",
+              "description": "Debito condiviso piu' entrate, uscite e risparmio del mese",
+              "minWidth": "320dp",
+              "minHeight": "110dp",
+              "resizeMode": "horizontal|vertical",
+              "updatePeriodMillis": 1800000
             }
           ]
         }
