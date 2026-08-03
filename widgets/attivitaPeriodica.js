@@ -34,8 +34,11 @@ export async function registraAttivitaPeriodica() {
       console.log('[RMoney] lavoro in background limitato dal sistema');
       return;
     }
-    await BackgroundTask.registerTaskAsync(NOME_ATTIVITA, { minimumInterval: 15 });
-    console.log('[RMoney] lavoro periodico registrato (15 min)');
+    // 30 minuti, non i 15 minimi consentiti: ogni giro costa tre richieste al
+    // backend e per due persone che segnano qualche spesa al giorno il
+    // guadagno di dimezzare l'attesa non vale il carico aggiunto.
+    await BackgroundTask.registerTaskAsync(NOME_ATTIVITA, { minimumInterval: 30 });
+    console.log('[RMoney] lavoro periodico registrato (30 min)');
   } catch (e) {
     console.log('[RMoney] registrazione lavoro periodico fallita: ' + e);
   }

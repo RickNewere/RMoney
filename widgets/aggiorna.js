@@ -13,12 +13,31 @@ import { componiWidget, NOMI_WIDGET } from './disegna';
 // possono capitare a distanza di un istante: senza questa guardia partivano
 // letture sovrapposte che si ostacolavano a vicenda.
 let inCorso = null;
+let ultimo = 0;
+
+// Distanza minima fra due aggiornamenti spontanei. Apre e chiudi l'app e sono
+// gia' due letture a pochi secondi l'una dall'altra; sommate al lavoro
+// periodico bastavano a congestionare Apps Script, che sotto carico smette di
+// rispondere con JSON e restituisce pagine di errore (misurato: 2,7 s la prima
+// lettura, 19 s e poi 33 s le successive, entrambe pagine HTML).
+const DISTANZA_MIN_MS = 10 * 60 * 1000;
+
+// Motivi che saltano la distanza minima: sono richieste esplicite o segnalano
+// che il foglio e' appena cambiato, quindi il dato vecchio e' sicuramente
+// sbagliato e vale la richiesta in piu'.
+const SEMPRE = ['scrittura sul foglio', 'tocco'];
 
 export function aggiornaWidget(motivo) {
   if (inCorso) {
     console.log('[RMoney] aggiornamento gia\' in corso, salto: ' + motivo);
     return inCorso;
   }
+  const eta = Date.now() - ultimo;
+  if (ultimo && eta < DISTANZA_MIN_MS && SEMPRE.indexOf(motivo) < 0) {
+    console.log('[RMoney] aggiornato da ' + Math.round(eta / 1000) + 's, salto: ' + motivo);
+    return Promise.resolve();
+  }
+  ultimo = Date.now();
   inCorso = aggiornaOra(motivo);
   inCorso.then(
     function () { inCorso = null; },

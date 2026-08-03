@@ -61,7 +61,11 @@ export async function chiedi(url) {
     } catch (e) {
       console.log('[RMoney] rete: fallito (' + e.message + ')');
       ultimo = e;
-      if (i < TENTATIVI - 1) await new Promise((r) => setTimeout(r, 700 * (i + 1)));
+      // Pausa lunga prima di riprovare: quando Apps Script risponde con una
+      // pagina invece dei dati e' perche' e' congestionato, e ributtarsi subito
+      // peggiora la coda. Dopo due minuti di respiro tornava a rispondere in
+      // 6,9 s contro i 33 s sotto pressione.
+      if (i < TENTATIVI - 1) await new Promise((r) => setTimeout(r, 3000));
     }
   }
   throw ultimo;
@@ -70,10 +74,18 @@ export async function chiedi(url) {
 // Un solo tentativo, con timeout corto: questa lettura ha gia' un ripiego
 // buono (API_URL), quindi insistere qui aggiungerebbe solo attesa prima di
 // arrivare ai dati veri.
+let apiInMemoria = null;
+
 export async function risolviApi() {
+  // Una volta sola per processo: l'URL cambia quando si fa una nuova
+  // distribuzione, non fra un aggiornamento e l'altro.
+  if (apiInMemoria) return apiInMemoria;
   try {
     const j = await unaVolta(API_CONFIG_URL + '?t=' + Date.now(), 5000);
-    if (j && typeof j.exec === 'string' && j.exec.indexOf('/exec') > 0) return j.exec;
+    if (j && typeof j.exec === 'string' && j.exec.indexOf('/exec') > 0) {
+      apiInMemoria = j.exec;
+      return apiInMemoria;
+    }
   } catch (e) {
     // offline, or the file is not published: the baked in URL still works as
     // long as that deployment has not been archived.
