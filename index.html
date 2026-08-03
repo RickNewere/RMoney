@@ -329,11 +329,21 @@
     // sole: l'inciampo e' passeggero e sparisce al tentativo dopo.
     function apiGet(url, tentativo) {
       tentativo = tentativo || 0;
-      return fetch(url).then(leggiRisposta).catch(function (e) {
-        if (tentativo >= 2) throw e;
-        return new Promise(function (ok) { setTimeout(ok, 700 * (tentativo + 1)); })
-          .then(function () { return apiGet(url, tentativo + 1); });
-      });
+      // Tetto sul singolo tentativo: misurato, sotto carico Apps Script arriva
+      // a rispondere dopo 33 secondi, e senza limite la pagina resta appesa.
+      var ctrl = window.AbortController ? new AbortController() : null;
+      var scaduto = setTimeout(function () { if (ctrl) ctrl.abort(); }, 30000);
+      return fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
+        .then(leggiRisposta)
+        .then(function (j) { clearTimeout(scaduto); return j; })
+        .catch(function (e) {
+          clearTimeout(scaduto);
+          if (tentativo >= 2) throw e;
+          // Pausa lunga: quando risponde con una pagina invece dei dati e'
+          // perche' e' congestionato, e ributtarsi subito peggiora la coda.
+          return new Promise(function (ok) { setTimeout(ok, 2500 * (tentativo + 1)); })
+            .then(function () { return apiGet(url, tentativo + 1); });
+        });
     }
 
     // Le scritture NON ritentano mai da sole. La richiesta potrebbe essere
@@ -375,13 +385,23 @@
     var catReq = 0; // token: solo l'ultima richiesta puo' scrivere nella select
 
     function caricaCategorie(tentativo) {
-      tentativo = tentativo || 0;
       var sel = document.getElementById('categoria');
       var mio = ++catReq;
       var mioGid = gid();
-      // value="" cosi' un invio prima del caricamento non scrive la stringa
-      // "Caricamento…" come categoria nel foglio.
-      if (!tentativo) sel.innerHTML = '<option value="">Caricamento…</option>';
+
+      // Le categorie cambiano una volta ogni mai, e senza di loro non si puo'
+      // inserire niente. Quindi si mostrano SUBITO quelle salvate l'ultima
+      // volta e la rete serve solo ad aggiornarle: se Apps Script e' lento o
+      // risponde con una pagina di errore, il form resta comunque usabile.
+      var salvate = leggiCategorieSalvate(mioGid);
+      if (salvate && salvate.length) {
+        riempiCategorie(sel, salvate);
+      } else {
+        // value="" cosi' un invio prima del caricamento non scrive la stringa
+        // "Caricamento…" come categoria nel foglio.
+        sel.innerHTML = '<option value="">Caricamento…</option>';
+      }
+
       apiGet(API + '?action=categorie&gid=' + mioGid)
         .then(function (j) {
           // Una risposta senza ok non e' un elenco vuoto: e' un errore, e va
@@ -389,26 +409,51 @@
           if (!j || !j.ok) throw new Error('risposta non valida');
           if (mio !== catReq) return;
           var cats = j.categorie || [];
-          sel.innerHTML = '';
-          if (!cats.length) { sel.innerHTML = '<option value="">(nessuna categoria)</option>'; return; }
-          cats.forEach(function (c) {
-            var o = document.createElement('option');
-            o.value = c; o.textContent = c; sel.appendChild(o);
-          });
+          if (!cats.length) {
+            if (!salvate || !salvate.length) {
+              sel.innerHTML = '<option value="">(nessuna categoria)</option>';
+            }
+            return;
+          }
+          salvaCategorie(mioGid, cats);
+          riempiCategorie(sel, cats);
         })
         .catch(function () {
           if (mio !== catReq) return;
-          // Apps Script ogni tanto risponde con una pagina HTML al posto del
-          // JSON. E' transitorio e sparisce al tentativo dopo, ma senza ritenti
-          // basta quell'unico inciampo per lasciare il form inutilizzabile
-          // finche' non si ricarica la pagina a mano.
-          if (tentativo < 2) {
-            setTimeout(function () { caricaCategorie(tentativo + 1); }, 700 * (tentativo + 1));
-            return;
-          }
+          // Con una lista salvata non si segnala niente: l'utente puo' gia'
+          // inserire, e le categorie non cambiano quasi mai.
+          if (salvate && salvate.length) return;
           sel.innerHTML = '<option value="">(errore, tocca per riprovare)</option>';
         });
     }
+
+    // Mantiene la scelta corrente se e' ancora fra le opzioni: ricaricare la
+    // lista mentre stai compilando non deve spostarti la categoria scelta.
+    function riempiCategorie(sel, cats) {
+      var prima = sel.value;
+      sel.innerHTML = '';
+      cats.forEach(function (c) {
+        var o = document.createElement('option');
+        o.value = c; o.textContent = c; sel.appendChild(o);
+      });
+      if (prima && cats.indexOf(prima) >= 0) sel.value = prima;
+    }
+
+    function chiaveCategorie(g) { return 'rmoney_cat_' + g; }
+
+    function leggiCategorieSalvate(g) {
+      try {
+        var s = localStorage.getItem(chiaveCategorie(g));
+        var v = s ? JSON.parse(s) : null;
+        return (v && v.length) ? v : null;
+      } catch (e) { return null; }
+    }
+
+    function salvaCategorie(g, cats) {
+      try { localStorage.setItem(chiaveCategorie(g), JSON.stringify(cats)); }
+      catch (e) { /* spazio pieno o modalita' privata: pazienza */ }
+    }
+
     caricaCategorie();
 
     // Rete tornata, o inciampo passeggero: toccare la select riprova.
