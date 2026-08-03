@@ -119,6 +119,10 @@ async function leggiCoppia(api, c) {
 
 // Ultimo valore salvato, o null. Anche la lettura ha un tetto: un modulo nativo
 // che non risponde bloccherebbe il disegno invece di far ripiegare sul vuoto.
+export async function leggiCacheDebito() {
+  return leggiCache();
+}
+
 async function leggiCache() {
   try {
     const grezzo = await Promise.race([

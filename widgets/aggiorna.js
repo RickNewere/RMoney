@@ -1,5 +1,6 @@
 import { requestWidgetUpdate } from 'react-native-android-widget';
 import { componiWidget, NOMI_WIDGET } from './disegna';
+import { leggiCacheDebito, leggiDebito } from './debitoData';
 
 // Aggiorna tutti i widget piazzati sulla home.
 //
@@ -46,27 +47,44 @@ export function aggiornaWidget(motivo) {
   return inCorso;
 }
 
-function aggiornaOra(motivo) {
+// Due passate.
+//
+// La prima disegna con quello che c'e' gia' in cache, senza toccare la rete, e
+// serve a non lasciare mai il widget bianco: dopo ogni reinstallazione Android
+// azzera il disegno, e se la lettura dal backend non fa in tempo a finire prima
+// che l'app vada in background il widget resta vuoto. Con il backend che
+// impiega dai 10 ai 30 secondi succedeva quasi sempre.
+//
+// La seconda passata rifa' il disegno con i dati freschi appena arrivano.
+async function aggiornaOra(motivo) {
   console.log('[RMoney] aggiorno widget: ' + motivo);
 
+  const cache = await leggiCacheDebito();
+  if (cache) {
+    await disegnaTutti(motivo + '/cache', cache);
+  }
+
+  const fresco = await leggiDebito();
+  await disegnaTutti(motivo + '/rete', fresco);
+}
+
+function disegnaTutti(fase, debito) {
   return Promise.all(NOMI_WIDGET.map(function (nome) {
     return requestWidgetUpdate({
       widgetName: nome,
       renderWidget: async (info) => {
-        console.log('[RMoney] disegno ' + nome + ' id=' + info.widgetId
+        console.log('[RMoney] disegno ' + nome + ' (' + fase + ') id=' + info.widgetId
           + ' ' + info.width + 'x' + info.height);
         try {
-          const albero = await componiWidget(nome, info);
-          console.log('[RMoney] disegno pronto ' + nome);
+          const albero = await componiWidget(nome, info, debito);
+          console.log('[RMoney] disegno pronto ' + nome + ' (' + fase + ')');
           return albero;
         } catch (e) {
-          console.log('[RMoney] disegno FALLITO ' + nome + ': ' + e);
+          console.log('[RMoney] disegno FALLITO ' + nome + ' (' + fase + '): ' + e);
           throw e;
         }
       },
       widgetNotFound: () => console.log('[RMoney] ' + nome + ' non sulla home'),
-    })
-      .then(function () { console.log('[RMoney] ' + nome + ' inviato (' + motivo + ')'); })
-      .catch(function (e) { console.log('[RMoney] ' + nome + ' fallito: ' + e); });
+    }).catch(function (e) { console.log('[RMoney] ' + nome + ' fallito: ' + e); });
   }));
 }

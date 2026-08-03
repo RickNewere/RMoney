@@ -27,13 +27,13 @@ export function disegnaRiepilogo(debito, riepilogo) {
   };
 }
 
-// Legge quello che serve al widget richiesto e ne restituisce il disegno.
-// Le due letture del widget grande partono insieme: sono endpoint diversi e
-// in sequenza raddoppierebbero l'attesa.
-export async function componiWidget(nome, widgetInfo) {
+// Compone il widget richiesto. Se `debitoPronto` e' fornito non tocca la rete:
+// serve alla prima passata, quella che disegna subito con la cache perche' il
+// widget non resti bianco mentre il backend fa aspettare anche mezzo minuto.
+export async function componiWidget(nome, widgetInfo, debitoPronto) {
+  const debito = debitoPronto || (await leggiDebito());
   if (nome === NOME_WIDGET_GRANDE) {
-    const [debito, riepilogo] = await Promise.all([leggiDebito(), leggiRiepilogo()]);
-    return disegnaRiepilogo(debito, riepilogo);
+    return disegnaRiepilogo(debito, await leggiRiepilogo());
   }
-  return disegnaDebito(await leggiDebito(), widgetInfo);
+  return disegnaDebito(debito, widgetInfo);
 }
