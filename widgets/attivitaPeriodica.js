@@ -29,6 +29,16 @@ TaskManager.defineTask(NOME_ATTIVITA, async () => {
 // solo. Registrare due volte lo stesso nome non crea doppioni: sostituisce.
 export async function registraAttivitaPeriodica() {
   try {
+    // Registrare di nuovo un lavoro periodico gia' attivo lo SOSTITUISCE, e il
+    // conto alla rovescia riparte da zero. Siccome questa funzione girava a
+    // ogni avvio dell'app, e l'app la si apre proprio per controllare se il
+    // widget si e' aggiornato, il mezz'ora non arrivava mai a scadere: bastava
+    // un'occhiata ogni venti minuti per rimandarlo all'infinito.
+    if (await TaskManager.isTaskRegisteredAsync(NOME_ATTIVITA)) {
+      console.log('[RMoney] lavoro periodico gia\' attivo, non lo tocco');
+      return;
+    }
+
     const stato = await BackgroundTask.getStatusAsync();
     if (stato === BackgroundTask.BackgroundTaskStatus.Restricted) {
       console.log('[RMoney] lavoro in background limitato dal sistema');
