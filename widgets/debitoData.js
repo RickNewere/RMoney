@@ -12,7 +12,11 @@ import { API_URL, TABS } from '../config';
 const API_CONFIG_URL = 'https://ricknewere.github.io/RMoney/api.json';
 
 const CACHE_KEY = 'DebitoWidget:ultimo';
-const TIMEOUT_MS = 12000;
+
+// Misurato sul backend vero: la lettura in euro impiega ~3 s, quella in franchi
+// ~10 s. Con 12 s di tetto la seconda arrivava al limite e veniva abortita.
+const TIMEOUT_MS = 25000;
+const TENTATIVI = 2;
 
 // Versione del formato salvato in cache. Va alzata ogni volta che cambiano i
 // campi di una voce: senza, dopo un aggiornamento dell'app il widget ripescava
@@ -48,12 +52,16 @@ export async function unaVolta(url, timeoutMs) {
 // lascerebbe il widget fermo sul dato vecchio per mezz'ora.
 export async function chiedi(url) {
   let ultimo;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < TENTATIVI; i++) {
     try {
-      return await unaVolta(url);
+      console.log('[RMoney] rete: tentativo ' + (i + 1) + ' ' + url.slice(-42));
+      const r = await unaVolta(url);
+      console.log('[RMoney] rete: ok');
+      return r;
     } catch (e) {
+      console.log('[RMoney] rete: fallito (' + e.message + ')');
       ultimo = e;
-      if (i < 2) await new Promise((r) => setTimeout(r, 700 * (i + 1)));
+      if (i < TENTATIVI - 1) await new Promise((r) => setTimeout(r, 700 * (i + 1)));
     }
   }
   throw ultimo;
@@ -97,33 +105,95 @@ async function leggiCoppia(api, c) {
   };
 }
 
+// Ultimo valore salvato, o null. Anche la lettura ha un tetto: un modulo nativo
+// che non risponde bloccherebbe il disegno invece di far ripiegare sul vuoto.
+async function leggiCache() {
+  try {
+    const grezzo = await Promise.race([
+      AsyncStorage.getItem(CACHE_KEY),
+      new Promise((_, no) => setTimeout(() => no(new Error('cache lenta')), 3000)),
+    ]);
+    if (!grezzo) return null;
+    const dati = JSON.parse(grezzo);
+    // Una cache di un formato precedente si scarta: meglio lo stato vuoto, che
+    // invita a toccare, di una schermata disegnata a meta'.
+    return (dati && dati.v === CACHE_V && dati.voci) ? dati : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Una sola lettura per volta, condivisa da tutti quelli che la chiedono.
+//
+// Le sorgenti che aggiornano il widget sono piu' di una (avvio dell'app, uscita
+// dall'app, lavoro periodico, tocco, e il widget grande che vuole gli stessi
+// dati) e capitano insieme. Senza questo si aprivano piu' letture in parallelo
+// che, sommate alla serializzazione di Apps Script, si abortivano a vicenda:
+// nei log si vedevano due serie identiche di tentativi finite tutte in
+// "Aborted". Chi arriva mentre una lettura e' in corso aspetta quella.
+let inCorso = null;
+
+export function leggiDebito() {
+  if (!inCorso) {
+    inCorso = leggiDebitoOra();
+    inCorso.then(
+      function () { inCorso = null; },
+      function () { inCorso = null; }
+    );
+  }
+  return inCorso;
+}
+
 // Sempre risolta: se la rete non risponde ripiega sull'ultimo valore salvato,
 // perche' un widget che mostra un numero vecchio e' piu' utile di uno vuoto.
-export async function leggiDebito() {
+async function leggiDebitoOra() {
   try {
+    console.log('[RMoney] leggo: risolvo api');
     const api = await risolviApi();
-    // In parallelo: le due valute sono indipendenti e Promise.all conserva
-    // l'ordine. In sequenza il widget ci metteva il doppio, e su un tocco
-    // "aggiorna" l'attesa si vede.
-    const voci = await Promise.all(COPPIE.map((c) => leggiCoppia(api, c)));
+    console.log('[RMoney] leggo: api risolta');
+
+    // UNA ALLA VOLTA, non in parallelo. Apps Script serializza le richieste
+    // dello stesso utente: mandandole insieme la seconda resta in coda mentre
+    // il suo timeout scorre, e veniva abortita a ogni tentativo. Misurato: euro
+    // ~3 s, franchi ~10 s da sole, 16 s se lanciate insieme.
+    const vecchie = await leggiCache();
+    const voci = [];
+    let almenoUna = false;
+    for (const c of COPPIE) {
+      try {
+        voci.push(await leggiCoppia(api, c));
+        almenoUna = true;
+      } catch (err) {
+        // Se una valuta non risponde si tiene il suo valore precedente invece
+        // di buttare via anche quella che era arrivata: prima bastava un
+        // fallimento su due per lasciare tutto il widget al palo.
+        console.log('[RMoney] leggo: ' + c.valuta + ' non letto (' + err.message + ')');
+        const vecchia = vecchie && (vecchie.voci || []).filter(function (v) {
+          return v.valuta === c.valuta;
+        })[0];
+        if (vecchia) voci.push(vecchia);
+      }
+    }
+    if (!almenoUna) throw new Error('nessuna valuta letta');
+    console.log('[RMoney] leggo: debiti letti (' + voci.length + ')');
     const dati = { v: CACHE_V, voci: voci, aggiornato: Date.now(), vecchio: false };
-    await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(dati));
+    // La scrittura in cache non deve poter bloccare il disegno: se il modulo
+    // nativo non risponde, il widget resterebbe appeso per sempre invece di
+    // mostrare i dati che ha gia' in mano.
+    try {
+      await Promise.race([
+        AsyncStorage.setItem(CACHE_KEY, JSON.stringify(dati)),
+        new Promise((_, no) => setTimeout(() => no(new Error('cache lenta')), 3000)),
+      ]);
+      console.log('[RMoney] leggo: cache scritta');
+    } catch (e) {
+      console.log('[RMoney] leggo: cache non scritta (' + e.message + ')');
+    }
     return dati;
   } catch (e) {
-    try {
-      const cache = await AsyncStorage.getItem(CACHE_KEY);
-      if (cache) {
-        const dati = JSON.parse(cache);
-        // Una cache di un formato precedente si scarta: meglio lo stato vuoto,
-        // che invita a toccare, di una schermata disegnata a meta'.
-        if (dati && dati.v === CACHE_V && dati.voci) {
-          dati.vecchio = true;
-          return dati;
-        }
-      }
-    } catch (e2) {
-      // cache illeggibile: si mostra lo stato vuoto
-    }
+    console.log('[RMoney] leggo: fallito (' + e.message + '), uso la cache');
+    const dati = await leggiCache();
+    if (dati) { dati.vecchio = true; return dati; }
     return { voci: null, aggiornato: null, vecchio: true };
   }
 }

@@ -1,12 +1,12 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   SafeAreaView, View, StyleSheet, ActivityIndicator,
   StatusBar, useColorScheme, AppState,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
-import { requestWidgetUpdate } from 'react-native-android-widget';
 
-import { componiWidget, NOMI_WIDGET } from './widgets/disegna';
+import { aggiornaWidget } from './widgets/aggiorna';
+import { registraAttivitaPeriodica } from './widgets/attivitaPeriodica';
 
 // The Android app is a thin shell around the live web app, so both clients
 // stay identical and future web updates require no APK rebuild.
@@ -54,23 +54,8 @@ export default function App() {
   const webRef = useRef(null);
   const [loading, setLoading] = useState(true);
 
-  const aggiornaWidget = useCallback(function (motivo) {
-    console.log('[RMoney] aggiorno widget: ' + motivo);
-    // Entrambi i widget: quale sia sulla home lo sa solo il launcher, e
-    // requestWidgetUpdate su un nome non piazzato costa una chiamata a vuoto.
-    NOMI_WIDGET.forEach(function (nome) {
-      requestWidgetUpdate({
-        widgetName: nome,
-        renderWidget: (info) => componiWidget(nome, info),
-        // Nessun widget di quel tipo sulla home: non e' un errore.
-        widgetNotFound: () => console.log('[RMoney] ' + nome + ' non sulla home'),
-      })
-        .then(function () { console.log('[RMoney] ' + nome + ' aggiornato (' + motivo + ')'); })
-        .catch(function (e) {
-          // Un aggiornamento mancato non deve disturbare l'uso dell'app.
-          console.log('[RMoney] ' + nome + ' fallito: ' + e);
-        });
-    });
+  useEffect(function () {
+    registraAttivitaPeriodica();
   }, []);
 
   useEffect(function () {
@@ -82,7 +67,7 @@ export default function App() {
       if (stato === 'background' || stato === 'inactive') aggiornaWidget('uscita');
     });
     return function () { sub.remove(); };
-  }, [aggiornaWidget]);
+  }, []);
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: bg }]}>

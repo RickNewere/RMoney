@@ -50,7 +50,8 @@
             }
           ]
         }
-      ]
+      ],
+      "expo-background-task"
     ]
   }
 }
