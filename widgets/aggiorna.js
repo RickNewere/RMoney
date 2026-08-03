@@ -26,7 +26,11 @@ const DISTANZA_MIN_MS = 10 * 60 * 1000;
 // Motivi che saltano la distanza minima: sono richieste esplicite o segnalano
 // che il foglio e' appena cambiato, quindi il dato vecchio e' sicuramente
 // sbagliato e vale la richiesta in piu'.
-const SEMPRE = ['scrittura sul foglio', 'tocco'];
+// "avvio" e' incluso apposta: aprire l'app e' un gesto voluto, tipicamente
+// perche' si vuole vedere il dato aggiornato (per esempio dopo aver inserito
+// una spesa dall'iPhone). Con la distanza minima applicata anche li', il widget
+// poteva restare indietro proprio nel momento in cui lo si stava guardando.
+const SEMPRE = ['scrittura sul foglio', 'tocco', 'avvio'];
 
 export function aggiornaWidget(motivo) {
   if (inCorso) {
