@@ -299,6 +299,55 @@
     document.getElementById('data').value = new Date().toISOString().slice(0, 10);
     function gid() { return TABS[persona][conto]; }
 
+    // ---- Lettura delle risposte del backend ----
+    // Apps Script ogni tanto risponde con una PAGINA HTML al posto del JSON: il
+    // /exec passa da un redirect su googleusercontent, e quando quel passaggio
+    // inciampa torna indietro una pagina di Google con stato 200. Chiamando
+    // r.json() l'errore che ne esce e' opaco e cambia da browser a browser: su
+    // Safari e' "The string did not match the expected pattern", che non dice
+    // niente a nessuno e sembra un bug dell'app.
+    //
+    // Qui la risposta si legge come testo, si riconosce il caso e si alza un
+    // errore comprensibile. Tutte le chiamate passano di qui: prima ognuna
+    // faceva il proprio .json(), ed e' il motivo per cui lo stesso guasto e'
+    // saltato fuori due volte in punti diversi.
+    function leggiRisposta(r) {
+      return r.text().then(function (t) {
+        var s = (t || '').trim();
+        if (s.charAt(0) === '<') {
+          throw new Error('Il server ha risposto con una pagina invece dei dati');
+        }
+        try {
+          return JSON.parse(s);
+        } catch (e) {
+          throw new Error('Risposta illeggibile dal server');
+        }
+      });
+    }
+
+    // Le letture si possono ripetere senza conseguenze, quindi ritentano da
+    // sole: l'inciampo e' passeggero e sparisce al tentativo dopo.
+    function apiGet(url, tentativo) {
+      tentativo = tentativo || 0;
+      return fetch(url).then(leggiRisposta).catch(function (e) {
+        if (tentativo >= 2) throw e;
+        return new Promise(function (ok) { setTimeout(ok, 700 * (tentativo + 1)); })
+          .then(function () { return apiGet(url, tentativo + 1); });
+      });
+    }
+
+    // Le scritture NON ritentano mai da sole. La richiesta potrebbe essere
+    // arrivata comunque, e un secondo invio scriverebbe la spesa due volte:
+    // e' esattamente cosi' che e' nato un doppione sul foglio. Chi chiama deve
+    // verificare sul foglio, non reinviare.
+    function apiPost(corpo) {
+      return fetch(API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(corpo)
+      }).then(leggiRisposta);
+    }
+
     function initSeg(id, onPick) {
       var box = document.getElementById(id);
       box.addEventListener('click', function (ev) {
@@ -333,8 +382,7 @@
       // value="" cosi' un invio prima del caricamento non scrive la stringa
       // "Caricamento…" come categoria nel foglio.
       if (!tentativo) sel.innerHTML = '<option value="">Caricamento…</option>';
-      fetch(API + '?action=categorie&gid=' + mioGid)
-        .then(function (r) { return r.json(); })
+      apiGet(API + '?action=categorie&gid=' + mioGid)
         .then(function (j) {
           // Una risposta senza ok non e' un elenco vuoto: e' un errore, e va
           // trattata come tale o la select resta muta senza spiegazione.
@@ -404,8 +452,7 @@
       saldaBtn.disabled = true;
       document.getElementById('saldaMsg').textContent = '';
 
-      fetch(API + '?action=debito&gid=' + TABS[pReq][cReq] + '&gidPartner=' + TABS[altraReq][cReq])
-        .then(function (r) { return r.json(); })
+      apiGet(API + '?action=debito&gid=' + TABS[pReq][cReq] + '&gidPartner=' + TABS[altraReq][cReq])
         .then(function (j) {
           if (myReq !== debitoReq) return; // risposta superata da una piu' recente
           saldaBtn.disabled = false;
@@ -453,12 +500,7 @@
       if (!ok) return;
       var btn = this;
       btn.disabled = true; m.className = 'saldaMsg'; m.textContent = 'Azzeramento…';
-      fetch(API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ op: 'salda', gid: gid() })
-      })
-        .then(function (r) { return r.json(); })
+      apiPost({ op: 'salda', gid: gid() })
         .then(function (j) {
           if (j && j.ok) {
             caricaDebito(); // ricalcola prima (azzera saldaMsg internamente)
@@ -473,8 +515,7 @@
           // Invece di lasciare il dubbio, ricontrolliamo il totale reale: se e'
           // ancora diverso da zero l'azzeramento non e' passato e si puo' riprovare.
           m.className = 'saldaMsg'; m.textContent = 'Errore di rete, verifico…';
-          fetch(API + '?action=debito&gid=' + gid())
-            .then(function (r) { return r.json(); })
+          apiGet(API + '?action=debito&gid=' + gid())
             .then(function (j) {
               var d = j && j.debito && j.debito.mio;
               if (d && d.conteggio === 0) {
@@ -516,12 +557,7 @@
       };
 
       btn.disabled = true; msg.className = ''; msg.textContent = 'Salvataggio…';
-      fetch(API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(dati)
-      })
-        .then(function (r) { return r.json(); })
+      apiPost(dati)
         .then(function (j) {
           if (j && j.ok) {
             msg.className = 'ok'; msg.textContent = '✓ Spesa aggiunta al foglio!';
@@ -579,8 +615,7 @@
       var atteso = Math.abs(parseFloat(String(dati.spesa).replace(',', '.')));
       var nota = String(dati.nota || '').trim();
 
-      fetch(url)
-        .then(function (r) { return r.json(); })
+      apiGet(url)
         .then(function (j) {
           if (!j || !j.ok || !j.spese) throw new Error('risposta non valida');
           var righe = j.spese.righe || [];
@@ -679,8 +714,7 @@
         var mm = (document.getElementById('riepMese').value || '').split('-');
         url += '&anno=' + (mm[0] || '') + '&mese=' + (parseInt(mm[1], 10) || '');
       }
-      fetch(url)
-        .then(function (r) { return r.json(); })
+      apiGet(url)
         .then(function (j) {
           if (myReq !== riepReq) return; // risposta superata da una piu' recente
           var d = j && j.riepilogo;
@@ -940,18 +974,13 @@
       var m = document.getElementById('detMsg');
       b.disabled = true;
       m.textContent = 'Eliminazione…';
-      fetch(API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({
+      apiPost({
           op: 'elimina',
           gid: gid,
           riga: riga,
           // Il backend rifiuta se la riga nel frattempo e' cambiata.
           atteso: { importo: quanto, nota: nota, categoria: detCtx ? detCtx.cat : '' }
         })
-      })
-        .then(function (r) { return r.json(); })
         .then(function (j) {
           if (j && j.ok) {
             detDirty = true;
@@ -1018,8 +1047,7 @@
       var m = document.getElementById('detMsg');
       m.textContent = 'Caricamento…';
 
-      fetch(url)
-        .then(function (r) { return r.json(); })
+      apiGet(url)
         .then(function (j) {
           if (myReq !== detReq) return; // risposta superata da una piu' recente
           var d = j && j.spese;
