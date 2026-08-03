@@ -384,23 +384,18 @@
 
     var catReq = 0; // token: solo l'ultima richiesta puo' scrivere nella select
 
-    function caricaCategorie(tentativo) {
+    function caricaCategorie() {
       var sel = document.getElementById('categoria');
       var mio = ++catReq;
       var mioGid = gid();
 
-      // Le categorie cambiano una volta ogni mai, e senza di loro non si puo'
-      // inserire niente. Quindi si mostrano SUBITO quelle salvate l'ultima
-      // volta e la rete serve solo ad aggiornarle: se Apps Script e' lento o
-      // risponde con una pagina di errore, il form resta comunque usabile.
-      var salvate = leggiCategorieSalvate(mioGid);
-      if (salvate && salvate.length) {
-        riempiCategorie(sel, salvate);
-      } else {
-        // value="" cosi' un invio prima del caricamento non scrive la stringa
-        // "Caricamento…" come categoria nel foglio.
-        sel.innerHTML = '<option value="">Caricamento…</option>';
-      }
+      // Si mostra SUBITO l'elenco conosciuto e la rete serve solo ad
+      // aggiornarlo. Senza categorie non si puo' inserire niente, quindi farle
+      // dipendere da una risposta di Apps Script (che sotto carico risponde con
+      // pagine di errore) rendeva il form inutilizzabile per minuti interi.
+      var note = categorieNote();
+      if (note.length) riempiCategorie(sel, note);
+      else sel.innerHTML = '<option value="">Caricamento…</option>';
 
       apiGet(API + '?action=categorie&gid=' + mioGid)
         .then(function (j) {
@@ -409,20 +404,16 @@
           if (!j || !j.ok) throw new Error('risposta non valida');
           if (mio !== catReq) return;
           var cats = j.categorie || [];
-          if (!cats.length) {
-            if (!salvate || !salvate.length) {
-              sel.innerHTML = '<option value="">(nessuna categoria)</option>';
-            }
-            return;
-          }
-          salvaCategorie(mioGid, cats);
-          riempiCategorie(sel, cats);
+          if (cats.length) salvaCategorie(cats);
+          var tutte = categorieNote();
+          if (tutte.length) riempiCategorie(sel, tutte);
+          else sel.innerHTML = '<option value="">(nessuna categoria)</option>';
         })
         .catch(function () {
           if (mio !== catReq) return;
-          // Con una lista salvata non si segnala niente: l'utente puo' gia'
-          // inserire, e le categorie non cambiano quasi mai.
-          if (salvate && salvate.length) return;
+          // Con un elenco gia' noto non si segnala niente: si puo' inserire lo
+          // stesso, e le categorie non cambiano quasi mai.
+          if (categorieNote().length) return;
           sel.innerHTML = '<option value="">(errore, tocca per riprovare)</option>';
         });
     }
@@ -439,19 +430,33 @@
       if (prima && cats.indexOf(prima) >= 0) sel.value = prima;
     }
 
-    function chiaveCategorie(g) { return 'rmoney_cat_' + g; }
+    // UN SOLO elenco, non uno per foglio.
+    //
+    // `?action=categorie` restituisce solo le categorie GIA' USATE in quel tab,
+    // quindi su Riccardo franchi non compariva "Abbigliamento" per il semplice
+    // motivo che li' non era mai stata usata: un cerchio chiuso, perche' senza
+    // la voce nell'elenco la prima spesa non la puoi nemmeno inserire.
+    // Tenendo l'unione di tutto quello che si e' visto sui quattro fogli, ogni
+    // categoria resta scegliibile ovunque e non "sparisce" cambiando conto.
+    var CHIAVE_CAT = 'rmoney_categorie';
 
-    function leggiCategorieSalvate(g) {
+    function categorieNote() {
       try {
-        var s = localStorage.getItem(chiaveCategorie(g));
-        var v = s ? JSON.parse(s) : null;
-        return (v && v.length) ? v : null;
-      } catch (e) { return null; }
+        var v = JSON.parse(localStorage.getItem(CHIAVE_CAT) || '[]');
+        return (v && v.length) ? v : [];
+      } catch (e) { return []; }
     }
 
-    function salvaCategorie(g, cats) {
-      try { localStorage.setItem(chiaveCategorie(g), JSON.stringify(cats)); }
-      catch (e) { /* spazio pieno o modalita' privata: pazienza */ }
+    function salvaCategorie(cats) {
+      try {
+        var unione = categorieNote();
+        cats.forEach(function (c) {
+          c = String(c).trim();
+          if (c && unione.indexOf(c) < 0) unione.push(c);
+        });
+        unione.sort(function (a, b) { return a.localeCompare(b, 'it'); });
+        localStorage.setItem(CHIAVE_CAT, JSON.stringify(unione));
+      } catch (e) { /* spazio pieno o modalita' privata: pazienza */ }
     }
 
     caricaCategorie();
