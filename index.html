@@ -536,11 +536,61 @@
           }
           btn.disabled = false;
         })
-        .catch(function (e) {
-          msg.className = 'err'; msg.textContent = 'Errore di rete: ' + e.message;
-          btn.disabled = false;
+        .catch(function () {
+          // Qui NON si puo' ripetere la POST alla cieca: la richiesta potrebbe
+          // essere arrivata e la riga essere gia' sul foglio, e un secondo
+          // invio scriverebbe la spesa due volte. Si va invece a guardare se
+          // c'e'. Casi tipici: Apps Script che risponde con una pagina HTML al
+          // posto del JSON (su Safari l'errore e' l'incomprensibile "The string
+          // did not match the expected pattern"), oppure la rete caduta a meta'.
+          msg.className = ''; msg.textContent = 'Risposta non valida, controllo il foglio…';
+          verificaSpesaScritta(dati, function (errore, trovata) {
+            if (errore) {
+              msg.className = 'err';
+              msg.textContent = 'Non riesco a verificare. Guarda il foglio prima di riprovare, '
+                + 'per non inserirla due volte.';
+            } else if (trovata) {
+              msg.className = 'ok'; msg.textContent = '✓ Era comunque andata a buon fine';
+              document.getElementById('spesa').value = '';
+              document.getElementById('nota').value = '';
+              segno = false;
+              document.getElementById('checkBox').classList.remove('on');
+              document.getElementById('checkBox').textContent = '';
+              if (dati.segno) caricaDebito();
+            } else {
+              msg.className = 'err';
+              msg.textContent = 'Non salvata, premi di nuovo Aggiungi.';
+            }
+            btn.disabled = false;
+          });
         });
     });
+
+    // Cerca la spesa appena inviata fra quelle del suo mese e categoria.
+    // Serve a distinguere "non e' passata" da "e' passata ma la risposta si e'
+    // persa", che a schermo sono identiche e portano al doppio inserimento.
+    function verificaSpesaScritta(dati, cb) {
+      var p = String(dati.data || '').split('-');
+      if (p.length < 2) { cb(new Error('data non interpretabile')); return; }
+      var url = API + '?action=spese&conto=' + encodeURIComponent(conto)
+        + '&tipo=mensile&anno=' + p[0] + '&mese=' + parseInt(p[1], 10)
+        + '&persona=' + encodeURIComponent(persona)
+        + '&categoria=' + encodeURIComponent(dati.categoria);
+      var atteso = Math.abs(parseFloat(String(dati.spesa).replace(',', '.')));
+      var nota = String(dati.nota || '').trim();
+
+      fetch(url)
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (!j || !j.ok || !j.spese) throw new Error('risposta non valida');
+          var righe = j.spese.righe || [];
+          cb(null, righe.some(function (r) {
+            return Math.abs(Math.abs(r.importo) - atteso) < 0.005
+              && String(r.nota || '').trim() === nota;
+          }));
+        })
+        .catch(function (e) { cb(e); });
+    }
 
     // ==================== Riepilogo ====================
     var riepP = 'Annuale', riepC = 'Euro';
