@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v23';
+var VERSION = 'v24';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -608,10 +608,19 @@ function elencoCondivise(gid) {
 // paga il conto, tutti gli altri (iPhone, app Android, widget) rispondono
 // subito. E' la correzione che conta di piu' per l'iPhone, dove iOS cancella
 // periodicamente il salvataggio locale e la cache del browser spesso non c'e'.
-var DEBITO_TTL_S = 600;
+var DEBITO_TTL_S = 1800;
 
-function getDebito(gid, gidPartner) {
-  var chiave = _chiaveDebito(gid, gidPartner);
+// La cache sta sul SINGOLO FOGLIO, non sulla combinazione persona/conto.
+//
+// Le quattro combinazioni non sono quattro calcoli diversi: "Riccardo Euro" e
+// "Roberta Euro" usano gli stessi due totali, solo scambiati fra loro. Con la
+// cache sulla combinazione ognuna delle quattro restava fredda per conto suo, e
+// la prima apertura di ciascuna costava fino a 46 secondi. Con la cache sul
+// foglio, leggerne una ne scalda due, e l'aggiornamento periodico del widget,
+// che legge entrambe le valute, tiene caldi tutti e quattro i fogli per tutti i
+// dispositivi, iPhone compreso.
+function _totaleCondiviseCache(gid) {
+  var chiave = 'tot_' + gid;
   var cache = CacheService.getScriptCache();
   try {
     var pronto = cache.get(chiave);
@@ -620,12 +629,7 @@ function getDebito(gid, gidPartner) {
     // cache illeggibile: si ricalcola
   }
 
-  var mio = _totaleCondivise(gid);
-  var partner = (gidPartner != null && !isNaN(gidPartner))
-    ? _totaleCondivise(gidPartner)
-    : { totale: 0, meta: 0, conteggio: 0 };
-  var res = { mio: mio, partner: partner, netto: mio.meta - partner.meta };
-
+  var res = _totaleCondivise(gid);
   try {
     cache.put(chiave, JSON.stringify(res), DEBITO_TTL_S);
   } catch (e) {
@@ -634,37 +638,24 @@ function getDebito(gid, gidPartner) {
   return res;
 }
 
-function _chiaveDebito(gid, gidPartner) {
-  return 'debito_' + gid + '_' + (gidPartner == null || isNaN(gidPartner) ? 'x' : gidPartner);
+function getDebito(gid, gidPartner) {
+  var mio = _totaleCondiviseCache(gid);
+  var partner = (gidPartner != null && !isNaN(gidPartner))
+    ? _totaleCondiviseCache(gidPartner)
+    : { totale: 0, meta: 0, conteggio: 0 };
+  return { mio: mio, partner: partner, netto: mio.meta - partner.meta };
 }
 
 // Da chiamare dopo OGNI scrittura che tocca la colonna split o gli importi:
 // senza questo la cache terrebbe in vita il valore vecchio fino a scadenza e
-// una spesa appena inserita non comparirebbe. Si azzerano tutte le
-// combinazioni che coinvolgono il foglio toccato e il suo partner di valuta.
+// una spesa appena inserita non comparirebbe. Basta invalidare il foglio
+// toccato: le combinazioni si ricompongono da li'.
 function _scadeCacheDebito(gid) {
   try {
-    var partner = _partnerDiValuta(gid);
-    var chiavi = [_chiaveDebito(gid, partner), _chiaveDebito(gid, null)];
-    if (partner != null) {
-      chiavi.push(_chiaveDebito(partner, gid));
-      chiavi.push(_chiaveDebito(partner, null));
-    }
-    CacheService.getScriptCache().removeAll(chiavi);
+    CacheService.getScriptCache().remove('tot_' + gid);
   } catch (e) {
     // se non si riesce a invalidare, il dato si aggiorna comunque entro il TTL
   }
-}
-
-// L'altro foglio della stessa valuta, o null se il gid non e' fra i LOG noti.
-function _partnerDiValuta(gid) {
-  var valute = Object.keys(LOG_GIDS);
-  for (var i = 0; i < valute.length; i++) {
-    var coppia = LOG_GIDS[valute[i]];
-    if (coppia.Roberta === gid) return coppia.Riccardo;
-    if (coppia.Riccardo === gid) return coppia.Roberta;
-  }
-  return null;
 }
 
 // ---------- Riepilogo (sola lettura) ----------
