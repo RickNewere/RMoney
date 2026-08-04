@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v24';
+var VERSION = 'v25';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -142,8 +142,8 @@ function doPost(e) {
     if (body.op === 'elimina') {
       return _json(svuotaRiga(parseInt(body.gid, 10), parseInt(body.riga, 10), body.atteso));
     }
-    aggiungiSpesa(body);
-    return _json({ ok: true });
+    var esito = aggiungiSpesa(body);
+    return _json({ ok: true, riga: esito.riga, ms: esito.ms, passi: esito.passi });
   } catch (err) {
     return _json({ ok: false, error: String((err && err.message) || err) });
   }
@@ -253,17 +253,35 @@ function _categorieDettaglio(gid) {
 }
 
 // ---------- Append spesa ----------
+// Quello che conta qui e' il NUMERO di operazioni sul foglio, non quanti dati si
+// leggono. Ogni scrittura fa ricalcolare il foglio intero (SOMMARIO e pivot
+// leggono i LOG), e ogni ricalcolo costa secondi.
+//
+// La versione precedente, per una sola spesa, faceva: scrittura riga, copia
+// formato, formato data, casella, valore casella, ordinamento dell'intera coda,
+// rimozione di tutte le caselle, azzeramento, reinserimento di tutte le caselle
+// e riscrittura della colonna. Dieci mutazioni, quindi dieci ricalcoli:
+// misurato, 4,6 secondi senza spunta e 29 secondi con la spunta.
+//
+// Qui si legge la coda una volta sola, si decide TUTTO in memoria (dove va la
+// riga, cosa si sposta) e si scrive una volta sola. Nel caso normale, spesa di
+// oggi che finisce in fondo, e' una singola riga scritta.
 function aggiungiSpesa(dati) {
+  var c = _cron();
   var gid = parseInt(dati.gid, 10);
   var sheet = _getSheetByGid(gid);
+  c.passo('foglio');
+
   var h = _findHeader(sheet);
   var headers = h.headers;
   var lastCol = h.lastCol;
+  c.passo('intestazioni');
 
   var idxData  = _colFor(headers, ['data']);
   var idxSpesa = _colFor(headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
   var idxCat   = _colFor(headers, ['categor']);
   var idxNota  = _colFor(headers, ['dettagl', 'nota', 'note', 'descriz']);
+  var idxSplit = _colFor(headers, ['split']);
 
   // se l'importo non ha un'intestazione riconosciuta, sta subito dopo la data
   if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
@@ -285,86 +303,205 @@ function aggiungiSpesa(dati) {
     idxNota = 3;
   }
 
-  // Spesa condivisa: la casella "split" va gestita DOPO appendRow, perche' se
-  // la cella non ha la data validation da checkbox, scrivere true la mostra
-  // come testo "true". Qui prepariamo solo il fallback "-" (colonna assente).
-  var idxSplit = _colFor(headers, ['split']);
-  if (dati.segno && idxSplit < 0 && idxNota >= 0) {
+  // La spunta viaggia dentro i valori della riga, non come scrittura a parte.
+  // Scrivere true in una cella senza convalida la mostrerebbe come testo
+  // "TRUE": per questo la casella viene garantita subito prima, sull'intervallo
+  // che sta per essere riscritto.
+  if (idxSplit >= 0) {
+    riga[idxSplit] = !!dati.segno;
+  } else if (dati.segno && idxNota >= 0) {
+    // Fogli senza colonna split: vale ancora il vecchio marcatore.
     var cDx = idxNota + 1;
     while (riga.length <= cDx) riga.push('');
     riga[cDx] = '-';
   }
-
-  // Se una cancellazione ha lasciato una riga vuota nella zona ordinabile la
-  // si riusa, altrimenti si accoda. Cosi' il foglio non cresce di una riga per
-  // ogni spesa cancellata e reinserita.
   while (riga.length < lastCol) riga.push('');
-  var r = _primaRigaLibera(sheet, h, SORT_FROM[gid]);
-  if (r) {
-    sheet.getRange(r, 1, 1, lastCol).setValues([riga.slice(0, lastCol)]);
-  } else {
+  riga = riga.slice(0, lastCol);
+
+  var da = SORT_FROM[gid];
+  if (!da) {
+    // Foglio non configurato per l'ordinamento: si accoda e basta.
     sheet.appendRow(riga);
-    r = sheet.getLastRow();
+    var rSemplice = sheet.getLastRow();
+    _copiaFormatoRiga(sheet, h.row + 1, rSemplice, lastCol);
+    if (idxSplit >= 0) sheet.getRange(rSemplice, idxSplit + 1).insertCheckboxes();
+    c.passo('scrittura');
+    _scadeCacheDebito(gid);
+    return _esito(rSemplice, c);
   }
 
-  // La riga nuova deve essere identica alle precedenti. appendRow non applica
-  // formati: eredita solo quelli gia' presenti nella riga di destinazione.
-  // I fogli hanno il formato contabile (" € 9,50 ") applicato a un intervallo
-  // finito, quindi quando i dati lo superano le nuove righe nascono senza
-  // formato e l'importo appare come "1" invece di " € 1,00 " (successo davvero
-  // su LOG RICCARDO dalla riga 770).
-  // Il modello e' la PRIMA riga di dati, non quella precedente: se le ultime
-  // righe sono gia' rotte, copiare da li' propagherebbe il difetto.
-  _copiaFormatoRiga(sheet, h.row + 1, r, lastCol);
+  var last = sheet.getLastRow();
+  var maxRighe = sheet.getMaxRows();
+  var coda = (last >= da)
+    ? sheet.getRange(da, 1, last - da + 1, lastCol).getValues()
+    : [];
+  c.passo('lettura coda');
 
-  // Formatta la data come "giorno mese anno" (es. 20 lug 2026), senza orario.
-  if (idxData >= 0) {
-    sheet.getRange(r, idxData + 1).setNumberFormat('d mmm yyyy');
+  // Righe che contengono davvero una spesa, nell'ordine in cui stanno adesso.
+  // I buchi lasciati dalle cancellazioni spariscono qui: la coda si compatta da
+  // sola al primo inserimento successivo.
+  var piene = [];
+  var ultimoPieno = -1;
+  for (var i = 0; i < coda.length; i++) {
+    if (_rigaVuota(coda[i], idxData, idxSpesa, idxCat, idxNota)) continue;
+    piene.push(coda[i]);
+    ultimoPieno = i;
   }
 
-  // La cella "split" deve sempre avere una checkbox vera, come tutte le altre
-  // righe: insertCheckboxes() imposta la data validation e mette il valore a
-  // false, quindi il setValue(true) successivo la lascia spuntata. Senza questo,
-  // una riga non condivisa restava una cella vuota senza casella.
+  // Posto in cui infilare la nuova riga: la coda e' tenuta in ordine di data,
+  // quindi basta il primo con data maggiore. Le date uguali restano dietro a
+  // quelle gia' presenti, cosi' l'ultima inserita e' l'ultima in basso.
+  var p = piene.length;
+  for (var k = 0; k < piene.length; k++) {
+    var d = _dataRiga(piene[k], idxData);
+    if (d && d.getTime() > dataVal.getTime()) { p = k; break; }
+  }
+  piene.splice(p, 0, riga);
+
+  // Prima riga che cambia davvero. Se sopra al punto di inserimento c'era un
+  // buco, la compattazione sposta tutto e bisogna partire da li'.
+  // Il confronto e' per riferimento: piene contiene gli stessi array di coda.
+  var inizio = p;
+  for (var q = 0; q < p; q++) {
+    if (piene[q] !== coda[q]) { inizio = q; break; }
+  }
+
+  var rigaNuova = da + p;
+  var ultima = da + piene.length - 1;   // ultima riga occupata dopo la scrittura
+  var quante = piene.length - inizio;
+
+  // Il foglio deve avere le righe fisiche per contenerla (appendRow le creava
+  // da solo, setValues no).
+  if (ultima > maxRighe) {
+    sheet.insertRowsAfter(maxRighe, ultima - maxRighe);
+    c.passo('righe nuove');
+  }
+
+  // Formato solo sulla riga che nasce ora: quelle gia' esistenti ce l'hanno.
+  // Il modello e' la PRIMA riga di dati, non l'ultima: se le ultime righe sono
+  // gia' venute male, copiare da li' propagherebbe il difetto.
+  if (ultima > last) {
+    _copiaFormatoRiga(sheet, h.row + 1, ultima, lastCol);
+    if (idxData >= 0) {
+      sheet.getRange(ultima, idxData + 1).setNumberFormat('d mmm yyyy');
+    }
+    c.passo('formato');
+  }
+
+  // Una sola chiamata per tutte le caselle dell'intervallo riscritto: se una
+  // riga nasce ora, o era stata svuotata, la sua cella non ha la convalida.
+  // Va fatta PRIMA di scrivere i valori, perche' azzera il contenuto.
   if (idxSplit >= 0) {
-    var cell = sheet.getRange(r, idxSplit + 1);
-    cell.insertCheckboxes();
-    if (dati.segno) cell.setValue(true);
+    sheet.getRange(da + inizio, idxSplit + 1, quante, 1).insertCheckboxes();
+    c.passo('caselle');
   }
 
-  // Rimette in ordine di data la sola coda del foglio.
-  _ordinaCoda(sheet, gid, h);
+  sheet.getRange(da + inizio, 1, quante, lastCol).setValues(piene.slice(inizio));
+  c.passo('scrittura');
+
+  // Se la coda si e' compattata, sotto restano le copie delle righe risalite.
+  var avanzo = ultimoPieno - piene.length + 1;
+  if (avanzo > 0) {
+    sheet.getRange(ultima + 1, 1, avanzo, lastCol).clearContent();
+    if (idxSplit >= 0) {
+      sheet.getRange(ultima + 1, idxSplit + 1, avanzo, 1).removeCheckboxes();
+    }
+    c.passo('pulizia coda');
+  }
 
   _scadeCacheDebito(gid);
+  return _esito(rigaNuova, c);
 }
 
-// ---------- Ordinamento della sola coda del foglio ----------
-// Riordina per data SOLO le righe dalla soglia SORT_FROM in giu'. Le righe
-// precedenti non vengono mai lette ne' spostate: lo storico e' congelato.
-// Le celle vuote finiscono in fondo all'intervallo ordinato, quindi il buco
-// lasciato da una cancellazione si sposta da solo alla fine e lo spazio torna
-// utilizzabile senza dover cercare la riga libera.
-function _ordinaCoda(sheet, gid, h) {
+// Cronometro dei passi della scrittura. I tempi tornano nella risposta JSON:
+// senza, un rallentamento si puo' solo indovinare.
+function _cron() {
+  var t0 = Date.now(), ultimo = t0, passi = [];
+  return {
+    passo: function (nome) {
+      var ora = Date.now();
+      passi.push(nome + ' ' + (ora - ultimo));
+      ultimo = ora;
+    },
+    totale: function () { return Date.now() - t0; },
+    elenco: function () { return passi; }
+  };
+}
+
+function _esito(riga, c) {
+  return { riga: riga, ms: c.totale(), passi: c.elenco() };
+}
+
+// Una riga e' vuota se non ha ne' data, ne' importo, ne' categoria, ne' nota.
+// La colonna split non conta: una casella superstite su una riga senza spesa e'
+// un residuo, non un dato.
+function _rigaVuota(row, idxData, idxSpesa, idxCat, idxNota) {
+  return [idxData, idxSpesa, idxCat, idxNota].every(function (k) {
+    return k < 0 || String(row[k]).trim() === '';
+  });
+}
+
+function _dataRiga(row, idxData) {
+  if (idxData < 0) return null;
+  var v = row[idxData];
+  if (v instanceof Date) return v;
+  if (!v) return null;
+  var d = new Date(v);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// ---------- Riordino della coda: manutenzione, non piu' a ogni scrittura ----------
+// Prima girava a ogni inserimento e a ogni cancellazione, ed era la voce di
+// costo piu' grossa: Range.sort() piu' la riscrittura completa della colonna
+// delle caselle, tutte operazioni che fanno ricalcolare il foglio.
+//
+// Non serve piu' tenerlo nel percorso normale: aggiungiSpesa infila la riga
+// gia' al posto giusto per data e compatta i buchi da sola. Resta qui come
+// attrezzo da lanciare a mano dall'editor Apps Script se una coda finisse
+// davvero fuori ordine (per esempio dopo una modifica fatta a mano sul foglio).
+//
+// Ordina in memoria e riscrive una volta sola, invece di usare Range.sort().
+function riordinaCoda(gid) {
+  var sheet = _getSheetByGid(gid);
+  var h = _findHeader(sheet);
   var da = SORT_FROM[gid];
-  if (!da) return 0; // foglio non configurato: non si ordina nulla
-  if (da <= h.row) return 0; // paranoia: mai sopra le intestazioni
-  var last = sheet.getLastRow();
-  var n = last - da + 1;
-  if (n < 2) return 0; // meno di due righe: niente da ordinare
+  if (!da) throw new Error('Foglio senza soglia SORT_FROM: non si ordina nulla.');
+  if (da <= h.row) throw new Error('La soglia cadrebbe sopra le intestazioni.');
 
   var idxData = _colFor(h.headers, ['data']);
-  if (idxData < 0) return 0; // senza colonna data non si puo' ordinare
-
-  var rng = sheet.getRange(da, 1, n, h.lastCol);
-  rng.sort({ column: idxData + 1, ascending: true });
-
-  // L'ordinamento sposta i valori: la colonna split va riallineata alle righe
-  // nella loro nuova posizione.
+  var idxSpesa = _colFor(h.headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
+  var idxCat = _colFor(h.headers, ['categor']);
+  var idxNota = _colFor(h.headers, ['dettagl', 'nota', 'note', 'descriz']);
   var idxSplit = _colFor(h.headers, ['split']);
-  if (idxSplit >= 0) {
-    _sistemaCheckboxCoda(sheet, h, da, n, idxSplit);
+  if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
+  if (idxData < 0) throw new Error('Colonna data non trovata.');
+
+  var last = sheet.getLastRow();
+  if (last - da + 1 < 2) return 'Niente da ordinare su ' + sheet.getName();
+
+  var coda = sheet.getRange(da, 1, last - da + 1, h.lastCol).getValues();
+  var piene = coda.filter(function (row) {
+    return !_rigaVuota(row, idxData, idxSpesa, idxCat, idxNota);
+  });
+  piene.sort(function (a, b) {
+    var da_ = _dataRiga(a, idxData), db_ = _dataRiga(b, idxData);
+    return (da_ ? da_.getTime() : 0) - (db_ ? db_.getTime() : 0);
+  });
+
+  if (piene.length) {
+    if (idxSplit >= 0) {
+      sheet.getRange(da, idxSplit + 1, piene.length, 1).insertCheckboxes();
+    }
+    sheet.getRange(da, 1, piene.length, h.lastCol).setValues(piene);
   }
-  return n;
+  var avanzo = coda.length - piene.length;
+  if (avanzo > 0) {
+    sheet.getRange(da + piene.length, 1, avanzo, h.lastCol).clearContent();
+    if (idxSplit >= 0) {
+      sheet.getRange(da + piene.length, idxSplit + 1, avanzo, 1).removeCheckboxes();
+    }
+  }
+  return sheet.getName() + ': ' + piene.length + ' righe in ordine, ' + avanzo + ' vuote in fondo';
 }
 
 // Riallinea la colonna "split" nella zona ordinabile: checkbox vera sulle righe
@@ -410,30 +547,6 @@ function _sistemaCheckboxCoda(sheet, h, da, n, idxSplit) {
     piene.setValues(flags.slice(0, ultimaPiena + 1));
   }
   return ultimaPiena + 1;
-}
-
-// Prima riga completamente vuota nella zona ordinabile, o 0 se non ce n'e'.
-// Serve a riusare lo spazio di una spesa cancellata invece di allungare il
-// foglio ogni volta.
-function _primaRigaLibera(sheet, h, da) {
-  if (!da) return 0;
-  var last = sheet.getLastRow();
-  if (last < da) return 0;
-  var idxData = _colFor(h.headers, ['data']);
-  var idxSpesa = _colFor(h.headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
-  var idxCat = _colFor(h.headers, ['categor']);
-  var idxNota = _colFor(h.headers, ['dettagl', 'nota', 'note', 'descriz']);
-  if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
-
-  var vals = sheet.getRange(da, 1, last - da + 1, h.lastCol).getValues();
-  for (var i = 0; i < vals.length; i++) {
-    var row = vals[i];
-    var vuota = [idxData, idxSpesa, idxCat, idxNota].every(function (k) {
-      return k < 0 || String(row[k]).trim() === '';
-    });
-    if (vuota) return da + i;
-  }
-  return 0;
 }
 
 // Copia i SOLI formati (valuta, font, allineamento, bordi) da una riga modello
@@ -1124,37 +1237,39 @@ function svuotaRiga(gid, riga, atteso) {
     nota: idxNota >= 0 ? String(row[idxNota]) : ''
   };
 
-  // clearContent() toglie i valori ma lascia intatta la formattazione, cosi'
-  // la riga vuota resta identica alle altre e un reinserimento futuro eredita
-  // il formato corretto.
-  [idxData, idxSpesa, idxCat, idxNota].forEach(function (i) {
-    if (i >= 0) sheet.getRange(riga, i + 1).clearContent();
-  });
-
-  // La checkbox va tolta del tutto, non lasciata vuota: una casella su una riga
+  // Le celle da svuotare si azzerano in un colpo solo, non una per una: ogni
+  // scrittura separata fa ricalcolare il foglio, e quattro clearContent() di
+  // fila costavano quattro ricalcoli per cancellare una riga sola.
+  // Si riscrive solo il tratto di colonne che contiene i campi interessati, e
+  // le colonne in mezzo che non c'entrano vengono riscritte com'erano.
+  //
+  // La casella va tolta del tutto, non lasciata vuota: una casella su una riga
   // senza spesa e' un residuo visibile, e per Google conta come contenuto,
   // quindi getLastRow() non si accorcia e il foglio continua a dichiarare righe
-  // che non esistono piu'. La checkbox non serve conservarla: aggiungiSpesa la
-  // reinserisce sulla riga di destinazione a ogni scrittura.
+  // che non esistono piu'. Non serve conservarla: aggiungiSpesa la rimette
+  // sulla riga di destinazione a ogni scrittura.
   if (idxSplit >= 0) {
-    var cell = sheet.getRange(riga, idxSplit + 1);
-    cell.removeCheckboxes();
-    cell.clearContent();
+    sheet.getRange(riga, idxSplit + 1).removeCheckboxes();
   }
 
-  // Se la riga svuotata sta nella zona ordinabile, riordinando la coda il
-  // buco scivola in fondo e lo spazio torna disponibile. Sopra la soglia non
-  // si tocca niente e la riga resta vuota dov'e'.
-  var ordinate = 0;
-  if (SORT_FROM[gid] && riga >= SORT_FROM[gid]) {
-    ordinate = _ordinaCoda(sheet, gid, h);
+  var tocchi = [idxData, idxSpesa, idxCat, idxNota, idxSplit]
+    .filter(function (i) { return i >= 0; });
+  var primaCol = Math.min.apply(null, tocchi);
+  var ultimaCol = Math.max.apply(null, tocchi);
+  var vuoti = [];
+  for (var cc = primaCol; cc <= ultimaCol; cc++) {
+    vuoti.push(tocchi.indexOf(cc) >= 0 ? '' : row[cc]);
   }
+  sheet.getRange(riga, primaCol + 1, 1, ultimaCol - primaCol + 1).setValues([vuoti]);
 
+  // Il buco non si riordina piu' qui: resta dov'e' e sparisce da solo al primo
+  // inserimento, che ricompatta la coda. Riordinare adesso costava un
+  // ricalcolo completo del foglio per una cancellazione.
   _scadeCacheDebito(gid);
 
   return {
     ok: true, version: VERSION, riga: riga, tab: sheet.getName(),
-    eliminato: prima, righeRiordinate: ordinate
+    eliminato: prima
   };
 }
 
