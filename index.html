@@ -657,16 +657,44 @@
       }, Promise.resolve()).then(function () { return fogli; });
     }
 
+    // Quanto si aspetta prima di rileggere il debito DOPO una scrittura.
+    //
+    // Appena una riga viene scritta il foglio ricalcola (i SOMMARIO e la pivot
+    // leggono i LOG), e una lettura lanciata in quel momento resta ferma ad
+    // aspettarlo. Misurato sul foglio vero dopo una spesa condivisa su LOG
+    // RICCARDO, sempre la stessa lettura di ?action=debiti:
+    //
+    //   lanciata subito ......... 36,26 s
+    //   4 secondi dopo ........... 4,29 s
+    //   8 secondi dopo ........... 3,91 s
+    //
+    // La scrittura in se' era durata 2,3 s. Era questo a far sembrare
+    // lentissima una spesa condivisa: il salvataggio finiva subito, ma la card
+    // del debito restava sui puntini per mezzo minuto e chiudeva su "non
+    // caricato, riprova", perche' la rilettura partiva addosso al ricalcolo e
+    // scadeva. Quattro secondi bastano, qui c'e' mezzo secondo di margine.
+    //
+    // ?action=cerca NON soffre di questo (2,12 s misurati subito dopo una
+    // scrittura), quindi la verifica dopo una risposta persa resta immediata.
+    var ATTESA_RILETTURA_MS = 4500;
+
     // Rilegge i quattro totali dal foglio. Da chiamare all'avvio e dopo ogni
     // scrittura che tocca le spunte, non a ogni cambio di tab.
     var debitoReq = 0; // token: solo l'ultima lettura puo' scrivere il risultato
 
-    function caricaDebito() {
+    function caricaDebito(ritardoMs) {
       var mio = ++debitoReq;
       fogliDebito = null;
       document.getElementById('saldaMsg').textContent = '';
       mostraDebito();
-      return leggiTuttiIDebiti()
+      var attesa = ritardoMs
+        ? new Promise(function (ok) { setTimeout(ok, ritardoMs); })
+        : Promise.resolve();
+      return attesa
+        .then(function () {
+          if (mio !== debitoReq) return null;
+          return leggiTuttiIDebiti();
+        })
         .then(function (fogli) {
           if (mio !== debitoReq) return; // superata da una lettura piu' recente
           fogliDebito = fogli;
@@ -729,7 +757,7 @@
               m.className = 'saldaMsg ok';
               m.textContent = '✓ Rimesse ' + (j.rimesse || 0) + ' spunte';
               b.remove();
-              caricaDebito();
+              caricaDebito(ATTESA_RILETTURA_MS);
             } else {
               m.className = 'saldaMsg err';
               m.textContent = 'Errore: ' + ((j && j.error) || 'sconosciuto');
@@ -763,7 +791,7 @@
         .then(function (j) {
           if (j && j.ok) {
             var gidFatto = gid();
-            caricaDebito(); // ricalcola prima (azzera saldaMsg internamente)
+            caricaDebito(ATTESA_RILETTURA_MS); // ricalcola dopo il ricalcolo del foglio
             m.className = 'saldaMsg ok'; m.textContent = '✓ Azzerate ' + (j.azzerate || 0) + ' spunte';
             if (j.annullabile) mostraAnnulla(gidFatto, j.azzerate || 0);
           } else {
@@ -785,7 +813,7 @@
                 m.className = 'saldaMsg err';
                 m.textContent = 'Non azzerato (' + (d ? d.conteggio : '?') + ' spunte ancora attive), riprova';
               }
-              caricaDebito();
+              caricaDebito(ATTESA_RILETTURA_MS);
             })
             .catch(function () {
               m.className = 'saldaMsg err'; m.textContent = 'Rete non raggiungibile, riprova';
@@ -827,7 +855,9 @@
             segno = false;
             document.getElementById('checkBox').classList.remove('on');
             document.getElementById('checkBox').textContent = '';
-            if (dati.segno) caricaDebito(); // spesa condivisa: aggiorna il totale
+            // Spesa condivisa: il totale cambia, ma il foglio sta ricalcolando
+            // e una lettura lanciata adesso resterebbe ferma ad aspettarlo.
+            if (dati.segno) caricaDebito(ATTESA_RILETTURA_MS);
           } else {
             msg.className = 'err'; msg.textContent = 'Errore: ' + ((j && j.error) || 'sconosciuto');
           }
@@ -857,7 +887,7 @@
               segno = false;
               document.getElementById('checkBox').classList.remove('on');
               document.getElementById('checkBox').textContent = '';
-              if (dati.segno) caricaDebito();
+              if (dati.segno) caricaDebito(ATTESA_RILETTURA_MS);
             } else {
               msg.className = 'err';
               msg.textContent = 'Non salvata, premi di nuovo Aggiungi.';
