@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v22';
+var VERSION = 'v23';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -334,6 +334,8 @@ function aggiungiSpesa(dati) {
 
   // Rimette in ordine di data la sola coda del foglio.
   _ordinaCoda(sheet, gid, h);
+
+  _scadeCacheDebito(gid);
 }
 
 // ---------- Ordinamento della sola coda del foglio ----------
@@ -600,12 +602,69 @@ function elencoCondivise(gid) {
 // della stessa valuta. netto = meta(mio) - meta(partner):
 //   > 0  -> la persona del foglio partner deve alla persona del foglio "mio"
 //   < 0  -> viceversa
+// Il calcolo scorre l'intera colonna split di due fogli e sotto carico Apps
+// Script ci mette da 3 a 45 secondi. Il risultato pero' cambia solo quando
+// qualcuno scrive, quindi si tiene in cache lato server: il primo che chiede
+// paga il conto, tutti gli altri (iPhone, app Android, widget) rispondono
+// subito. E' la correzione che conta di piu' per l'iPhone, dove iOS cancella
+// periodicamente il salvataggio locale e la cache del browser spesso non c'e'.
+var DEBITO_TTL_S = 600;
+
 function getDebito(gid, gidPartner) {
+  var chiave = _chiaveDebito(gid, gidPartner);
+  var cache = CacheService.getScriptCache();
+  try {
+    var pronto = cache.get(chiave);
+    if (pronto) return JSON.parse(pronto);
+  } catch (e) {
+    // cache illeggibile: si ricalcola
+  }
+
   var mio = _totaleCondivise(gid);
   var partner = (gidPartner != null && !isNaN(gidPartner))
     ? _totaleCondivise(gidPartner)
     : { totale: 0, meta: 0, conteggio: 0 };
-  return { mio: mio, partner: partner, netto: mio.meta - partner.meta };
+  var res = { mio: mio, partner: partner, netto: mio.meta - partner.meta };
+
+  try {
+    cache.put(chiave, JSON.stringify(res), DEBITO_TTL_S);
+  } catch (e) {
+    // non riuscire a salvare non deve far fallire la lettura
+  }
+  return res;
+}
+
+function _chiaveDebito(gid, gidPartner) {
+  return 'debito_' + gid + '_' + (gidPartner == null || isNaN(gidPartner) ? 'x' : gidPartner);
+}
+
+// Da chiamare dopo OGNI scrittura che tocca la colonna split o gli importi:
+// senza questo la cache terrebbe in vita il valore vecchio fino a scadenza e
+// una spesa appena inserita non comparirebbe. Si azzerano tutte le
+// combinazioni che coinvolgono il foglio toccato e il suo partner di valuta.
+function _scadeCacheDebito(gid) {
+  try {
+    var partner = _partnerDiValuta(gid);
+    var chiavi = [_chiaveDebito(gid, partner), _chiaveDebito(gid, null)];
+    if (partner != null) {
+      chiavi.push(_chiaveDebito(partner, gid));
+      chiavi.push(_chiaveDebito(partner, null));
+    }
+    CacheService.getScriptCache().removeAll(chiavi);
+  } catch (e) {
+    // se non si riesce a invalidare, il dato si aggiorna comunque entro il TTL
+  }
+}
+
+// L'altro foglio della stessa valuta, o null se il gid non e' fra i LOG noti.
+function _partnerDiValuta(gid) {
+  var valute = Object.keys(LOG_GIDS);
+  for (var i = 0; i < valute.length; i++) {
+    var coppia = LOG_GIDS[valute[i]];
+    if (coppia.Roberta === gid) return coppia.Riccardo;
+    if (coppia.Riccardo === gid) return coppia.Roberta;
+  }
+  return null;
 }
 
 // ---------- Riepilogo (sola lettura) ----------
@@ -964,6 +1023,7 @@ function saldaFoglio(gid) {
   // cronologia di Google Sheets. E' successo davvero, su 29 righe. Ora l'elenco
   // delle righe spuntate viene salvato, cosi' un annullamento le rimette tutte.
   _ricordaSalda(gid, spuntate);
+  _scadeCacheDebito(gid);
 
   return { azzerate: n, annullabile: spuntate.length > 0 };
 }
@@ -1011,6 +1071,7 @@ function annullaSalda(gid) {
   // Si consuma: annullare due volte di fila non ha senso e rimetterebbe spunte
   // su righe che nel frattempo potrebbero essere state cambiate a mano.
   PropertiesService.getScriptProperties().deleteProperty(_CHIAVE_SALDA + gid);
+  _scadeCacheDebito(gid);
 
   return { ok: true, version: VERSION, rimesse: rimesse, quando: dati.quando };
 }
@@ -1097,6 +1158,8 @@ function svuotaRiga(gid, riga, atteso) {
   if (SORT_FROM[gid] && riga >= SORT_FROM[gid]) {
     ordinate = _ordinaCoda(sheet, gid, h);
   }
+
+  _scadeCacheDebito(gid);
 
   return {
     ok: true, version: VERSION, riga: riga, tab: sheet.getName(),
