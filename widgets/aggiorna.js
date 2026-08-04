@@ -1,6 +1,6 @@
 import { requestWidgetUpdate } from 'react-native-android-widget';
 import { componiWidget, NOMI_WIDGET } from './disegna';
-import { leggiCacheDebito, leggiDebito } from './debitoData';
+import { leggiDebito, componiDebito } from './debitoData';
 
 // Aggiorna tutti i widget piazzati sulla home.
 //
@@ -76,29 +76,33 @@ export function aggiornaWidget(motivo) {
   return mio;
 }
 
-// Due passate.
+// Una passata sola: si legge dal foglio e si disegna quello.
 //
-// La prima disegna con quello che c'e' gia' in cache, senza toccare la rete, e
-// serve a non lasciare mai il widget bianco: dopo ogni reinstallazione Android
-// azzera il disegno, e se la lettura dal backend non fa in tempo a finire prima
-// che l'app vada in background il widget resta vuoto. Con il backend che
-// impiega dai 10 ai 30 secondi succedeva quasi sempre.
-//
-// La seconda passata rifa' il disegno con i dati freschi appena arrivano.
+// Prima ce n'erano due, la prima con l'ultimo valore salvato, per non lasciare
+// il widget bianco mentre arrivava il dato vero. Quel valore salvato non esiste
+// piu': sul debito condiviso non si conserva niente, quindi il widget mostra
+// solo numeri appena letti. Se la lettura fallisce disegna lo stato vuoto, che
+// invita a toccare, invece di un numero che potrebbe non valere piu'.
 async function aggiornaOra(motivo) {
   console.log('[RMoney] aggiorno widget: ' + motivo);
   try {
-    const cache = await leggiCacheDebito();
-    if (cache) {
-      await disegnaTutti(motivo + '/cache', cache);
-    }
-
     const fresco = await leggiDebito();
     await disegnaTutti(motivo + '/rete', fresco);
   } catch (e) {
     // Deve concludersi comunque: un'eccezione che sfugge lascerebbe la promise
     // rifiutata e, prima della scadenza, bloccherebbe gli aggiornamenti dopo.
     console.log('[RMoney] aggiornamento fallito (' + motivo + '): ' + e);
+  }
+}
+
+// Disegna con i totali che la pagina ha appena letto, senza chiedere niente al
+// backend. E' la strada normale quando l'app e' aperta: la pagina legge il
+// debito comunque, e chiederlo una seconda volta significa solo accodarsi.
+export async function aggiornaConDati(fogli, motivo) {
+  try {
+    await disegnaTutti(motivo + '/pagina', componiDebito(fogli));
+  } catch (e) {
+    console.log('[RMoney] aggiornamento dai dati della pagina fallito: ' + e);
   }
 }
 

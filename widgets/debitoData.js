@@ -2,7 +2,6 @@
 //
 // The widget runs in a headless JS task, outside the WebView, so it cannot
 // reuse anything from the web app: it talks to the Apps Script backend itself.
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_URL, TABS } from '../config';
 
 // The Apps Script URL changes every time a "Nuova distribuzione" is made, and
@@ -11,17 +10,12 @@ import { API_URL, TABS } from '../config';
 // and API_URL is only the fallback for when that file cannot be reached.
 const API_CONFIG_URL = 'https://ricknewere.github.io/RMoney/api.json';
 
-const CACHE_KEY = 'DebitoWidget:ultimo';
-
-// Misurato sul backend vero: la lettura in euro impiega ~3 s, quella in franchi
-// ~10 s. Con 12 s di tetto la seconda arrivava al limite e veniva abortita.
-const TIMEOUT_MS = 25000;
+// Misurato sul backend vero: ?action=debiti risponde in 4-6 s. Il tetto e'
+// molto piu' alto apposta, perche' il problema non e' mai stato la durata della
+// lettura ma l'attesa in coda: Apps Script serializza le richieste, e con 25 s
+// il widget veniva abortito due volte di fila mentre la pagina caricava le sue.
+const TIMEOUT_MS = 45000;
 const TENTATIVI = 2;
-
-// Versione del formato salvato in cache. Va alzata ogni volta che cambiano i
-// campi di una voce: senza, dopo un aggiornamento dell'app il widget ripescava
-// una voce vecchia priva dei campi nuovi e finiva per disegnare caselle vuote.
-const CACHE_V = 2;
 
 // The debt is computed per currency: the two sheets of the same currency are
 // compared against each other, euro and franchi never mix.
@@ -130,26 +124,22 @@ function componiVoce(fogli, c) {
   };
 }
 
-// Ultimo valore salvato, o null. Anche la lettura ha un tetto: un modulo nativo
-// che non risponde bloccherebbe il disegno invece di far ripiegare sul vuoto.
-export async function leggiCacheDebito() {
-  return leggiCache();
-}
-
-async function leggiCache() {
-  try {
-    const grezzo = await Promise.race([
-      AsyncStorage.getItem(CACHE_KEY),
-      new Promise((_, no) => setTimeout(() => no(new Error('cache lenta')), 3000)),
-    ]);
-    if (!grezzo) return null;
-    const dati = JSON.parse(grezzo);
-    // Una cache di un formato precedente si scarta: meglio lo stato vuoto, che
-    // invita a toccare, di una schermata disegnata a meta'.
-    return (dati && dati.v === CACHE_V && dati.voci) ? dati : null;
-  } catch (e) {
-    return null;
-  }
+// Trasforma i totali per foglio nel formato che disegna il widget.
+// Entra da due strade: la lettura fatta dal widget, e i totali che la pagina
+// passa all'app quando e' aperta (App.js). La seconda evita di chiedere al
+// backend una cosa che e' appena stata chiesta.
+//
+// NON SALVA NIENTE. Il debito condiviso non viene conservato da nessuna parte:
+// il widget disegna solo numeri appena letti dal foglio. Prima l'ultimo valore
+// finiva in AsyncStorage e veniva ridisegnato quando una lettura falliva; su
+// richiesta esplicita e' stato tolto, perche' su questa cifra si decide chi
+// paga e un numero vecchio e' peggio di nessun numero.
+// Conseguenza voluta, da non "correggere": dopo un riavvio o una
+// reinstallazione il widget resta vuoto finche' non riesce una lettura, e se la
+// lettura fallisce mostra lo stato vuoto che invita a toccare.
+export function componiDebito(fogli) {
+  const voci = COPPIE.map(function (c) { return componiVoce(fogli, c); });
+  return { voci: voci, aggiornato: Date.now(), vecchio: false };
 }
 
 // Una sola lettura per volta, condivisa da tutti quelli che la chiedono.
@@ -173,8 +163,8 @@ export function leggiDebito() {
   return inCorso;
 }
 
-// Sempre risolta: se la rete non risponde ripiega sull'ultimo valore salvato,
-// perche' un widget che mostra un numero vecchio e' piu' utile di uno vuoto.
+// Sempre risolta: se la rete non risponde torna lo stato vuoto, che il widget
+// disegna come invito a toccare. Non c'e' nessun valore di riserva da mostrare.
 async function leggiDebitoOra() {
   try {
     console.log('[RMoney] leggo: risolvo api');
@@ -198,29 +188,10 @@ async function leggiDebitoOra() {
     // aggiornano insieme, quindi ci si ripiega sulle letture per valuta.
     const fogli = j.fogli || await leggiPerValuta(api);
 
-    const voci = [];
-    for (const c of COPPIE) {
-      voci.push(componiVoce(fogli, c));
-    }
-    console.log('[RMoney] leggo: debiti letti (' + voci.length + ')');
-    const dati = { v: CACHE_V, voci: voci, aggiornato: Date.now(), vecchio: false };
-    // La scrittura in cache non deve poter bloccare il disegno: se il modulo
-    // nativo non risponde, il widget resterebbe appeso per sempre invece di
-    // mostrare i dati che ha gia' in mano.
-    try {
-      await Promise.race([
-        AsyncStorage.setItem(CACHE_KEY, JSON.stringify(dati)),
-        new Promise((_, no) => setTimeout(() => no(new Error('cache lenta')), 3000)),
-      ]);
-      console.log('[RMoney] leggo: cache scritta');
-    } catch (e) {
-      console.log('[RMoney] leggo: cache non scritta (' + e.message + ')');
-    }
-    return dati;
+    console.log('[RMoney] leggo: totali letti dal backend');
+    return componiDebito(fogli);
   } catch (e) {
-    console.log('[RMoney] leggo: fallito (' + e.message + '), uso la cache');
-    const dati = await leggiCache();
-    if (dati) { dati.vecchio = true; return dati; }
+    console.log('[RMoney] leggo: fallito (' + e.message + '), niente da mostrare');
     return { voci: null, aggiornato: null, vecchio: true };
   }
 }

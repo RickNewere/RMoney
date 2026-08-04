@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 
-import { aggiornaWidget } from './widgets/aggiorna';
+import { aggiornaWidget, aggiornaConDati } from './widgets/aggiorna';
 import { registraAttivitaPeriodica } from './widgets/attivitaPeriodica';
 import { chiediEsenzioneBatteria } from './widgets/esenzioneBatteria';
 
@@ -13,11 +13,17 @@ import { chiediEsenzioneBatteria } from './widgets/esenzioneBatteria';
 // stay identical and future web updates require no APK rebuild.
 const SITE_URL = 'https://ricknewere.github.io/RMoney/';
 
-// Runs inside the WebView. Wraps fetch so that a successful POST to the Apps
-// Script endpoint (a new expense, a delete, a settle) reports back to the app.
-// Android's own widget refresh is capped at once every 30 minutes and is best
-// effort on top of that, so without this the widget would keep showing the old
-// balance right after the user changed it.
+// Runs inside the WebView. Wraps fetch and reports two things to the app:
+//
+//  - una POST andata a buon fine (spesa, cancellazione, saldato): il widget si
+//    aggiorna subito invece di aspettare il giro periodico.
+//  - i totali del debito appena letti dalla pagina.
+//
+// Il secondo serve a non fare due volte la stessa lettura. Il widget e la
+// pagina chiedono lo stesso dato nello stesso momento all'avvio, e Apps Script
+// serializza le richieste: si accodavano e si abortivano a vicenda (nel log del
+// telefono, due tentativi di fila finiti in "Aborted"). Se la pagina l'ha gia'
+// letto, il widget usa quello e non chiede niente.
 const SPIA_SCRITTURE = `
 (function () {
   if (window.__rmoneySpia) return;
@@ -28,7 +34,7 @@ const SPIA_SCRITTURE = `
     try { console.log('[RMoneySpia] ' + testo); } catch (e) {}
   }
   function manda(msg) {
-    try { window.ReactNativeWebView.postMessage(msg); avvisa('inviato ' + msg); }
+    try { window.ReactNativeWebView.postMessage(msg); avvisa('inviato ' + msg.slice(0, 40)); }
     catch (e) { avvisa('postMessage fallito: ' + e); }
   }
   var originale = window.fetch;
@@ -40,6 +46,13 @@ const SPIA_SCRITTURE = `
         avvisa('POST intercettata, ok=' + res.ok);
         if (res.ok) manda('foglio-cambiato');
       }
+      if (metodo === 'GET' && res.ok && url.indexOf('action=debiti') > 0) {
+        // clone(): il corpo si legge una volta sola, e quello vero deve
+        // restare intatto per la pagina.
+        res.clone().json().then(function (j) {
+          if (j && j.fogli) manda('debiti:' + JSON.stringify(j.fogli));
+        }).catch(function () {});
+      }
       return res;
     });
   };
@@ -48,6 +61,17 @@ const SPIA_SCRITTURE = `
 })();
 true;
 `;
+
+// Quanto il widget aspetta i dati dalla pagina, all'avvio, prima di andarseli a
+// prendere da solo. La pagina li chiede comunque: partire insieme a lei
+// significa solo mettersi in coda dietro le sue richieste.
+//
+// Generoso apposta. Alla pagina serve caricarsi e poi fare la lettura, e con
+// 15 s consegnava appena in ritardo: il widget partiva lo stesso e la richiesta
+// in piu' era proprio quella da evitare. Aspettare non si vede, perche' il
+// widget ha gia' disegnato dalla cache; quello che si vede e' un aggiornamento
+// mancato, ed e' l'unico caso in cui questo tempo conta.
+const ATTESA_DATI_PAGINA_MS = 35000;
 
 export default function App() {
   const scheme = useColorScheme();
@@ -62,15 +86,30 @@ export default function App() {
     return function () { clearTimeout(t); };
   }, []);
 
+  // true appena la pagina ha passato i totali: da quel momento il widget non
+  // deve piu' andarseli a prendere da solo.
+  const arrivatiDallaPagina = useRef(false);
+
   useEffect(function () {
-    // All'avvio, e ogni volta che l'app viene lasciata: se l'utente ha appena
-    // inserito una spesa e torna alla home, il widget e' gia' aggiornato.
-    aggiornaWidget('avvio');
+    // All'avvio la lettura la fa la PAGINA, non il widget: e' la stessa
+    // richiesta, e farla in due vuol dire metterle in coda (Apps Script
+    // serializza, e il widget veniva abortito due volte di fila).
+    // Il widget non disegna niente nell'attesa, perche' non conserva nessun
+    // valore da rimettere a schermo: quello che si vede sulla home resta
+    // l'ultimo disegno fatto, finche' non ne arriva uno nuovo.
+    const attesa = setTimeout(function () {
+      if (arrivatiDallaPagina.current) return;
+      console.log('[RMoney] la pagina non ha dato i totali, li leggo io');
+      aggiornaWidget('avvio');
+    }, ATTESA_DATI_PAGINA_MS);
+
     const sub = AppState.addEventListener('change', function (stato) {
       console.log('[RMoney] AppState -> ' + stato);
+      // All'uscita la pagina non sta piu' leggendo niente, quindi qui la
+      // richiesta la fa il widget senza rischio di accodarsi.
       if (stato === 'background' || stato === 'inactive') aggiornaWidget('uscita');
     });
-    return function () { sub.remove(); };
+    return function () { clearTimeout(attesa); sub.remove(); };
   }, []);
 
   return (
@@ -93,9 +132,23 @@ export default function App() {
         injectedJavaScriptBeforeContentLoaded={SPIA_SCRITTURE}
         injectedJavaScript={SPIA_SCRITTURE}
         onMessage={(e) => {
-          const msg = e.nativeEvent.data;
+          const msg = e.nativeEvent.data || '';
+          if (msg.indexOf('debiti:') === 0) {
+            console.log('[RMoney] totali ricevuti dalla pagina');
+            arrivatiDallaPagina.current = true;
+            try {
+              aggiornaConDati(JSON.parse(msg.slice(7)), 'pagina');
+            } catch (err) {
+              console.log('[RMoney] totali dalla pagina illeggibili: ' + err);
+            }
+            return;
+          }
           console.log('[RMoney] messaggio dalla pagina: ' + msg);
-          if (msg === 'foglio-cambiato') aggiornaWidget('scrittura sul foglio');
+          if (msg === 'foglio-cambiato') {
+            // Dopo una scrittura la pagina rilegge i totali da sola e ce li
+            // ripassa da qui: si aspetta quelli invece di chiederli anche noi.
+            arrivatiDallaPagina.current = false;
+          }
         }}
       />
       {loading && (
