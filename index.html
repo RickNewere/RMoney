@@ -343,8 +343,20 @@
     // annullava la prima: se ne aggiungeva una seconda, che si accodava alla
     // prima e peggiorava proprio la congestione che aveva causato il ritardo.
     // Tre tentativi diventavano tre richieste tutte in fila.
-    var TETTI_MS = [20000, 45000];
-    var PAUSE_MS = [2000];
+    // Nessun tetto corto sulle LETTURE, e il motivo e' controintuitivo:
+    // interrompere una fetch NON ferma l'esecuzione su Apps Script. La
+    // richiesta scaduta continua a occupare la coda, quindi il ritentativo si
+    // accoda dietro quella che stava gia' girando e ci mette di piu', non di
+    // meno. Misurato sulla pagina viva dopo una spesa condivisa: primo
+    // tentativo interrotto a 20,0 s, secondo 36,5 s e 404, card finita su "non
+    // caricato". Con un tetto generoso il primo tentativo, che stava solo
+    // macinando, sarebbe arrivato in fondo.
+    //
+    // Quindi: si aspetta, e si ritenta UNA volta sola, per il caso in cui la
+    // risposta si sia persa davvero (il ritiro lato Google che torna 404).
+    // La card intanto mostra i puntini, non un numero vecchio.
+    var TETTI_MS = [45000, 45000];
+    var PAUSE_MS = [3000];
 
     // OGNI lettura porta un parametro diverso, e non e' una precauzione teorica.
     //
