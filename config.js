@@ -3,7 +3,7 @@
 //  Incolla qui l'URL dell'app web di Apps Script (finisce con /exec)
 //  Lo ottieni dopo aver distribuito il backend (vedi README.md).
 // ============================================================
-export const API_URL = 'https://script.google.com/macros/s/AKfycbzXHWg_x_kX-xq54_Y1X8xTSHcXShiOl77ybHvmS19T7maPC2XNllM-ccygwLAmn5DU9w/exec';
+export const API_URL = 'https://script.google.com/macros/s/AKfycbxGR7ekEWGJGxstAMBBOpBvzTHVTmD21WbkJG3rWeekaIoYCVujUNuhhFYQyrSK0yH_mw/exec';
 
 // Mappa Persona + Conto -> gid del tab su cui scrivere.
 export const TABS = {
