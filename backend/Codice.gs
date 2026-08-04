@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v21';
+var VERSION = 'v22';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -134,7 +134,10 @@ function doPost(e) {
     var body = JSON.parse(e.postData.contents);
     if (body.op === 'salda') {
       var res = saldaFoglio(parseInt(body.gid, 10));
-      return _json({ ok: true, azzerate: res.azzerate });
+      return _json({ ok: true, azzerate: res.azzerate, annullabile: res.annullabile });
+    }
+    if (body.op === 'annullaSalda') {
+      return _json(annullaSalda(parseInt(body.gid, 10)));
     }
     if (body.op === 'elimina') {
       return _json(svuotaRiga(parseInt(body.gid, 10), parseInt(body.riga, 10), body.atteso));
@@ -944,15 +947,72 @@ function saldaFoglio(gid) {
   var col = idxSplit + 1; // 1-based
   var rng = sheet.getRange(firstData, col, last - firstData + 1, 1);
   var vals = rng.getValues();
-  var out = [], n = 0;
+  var out = [], n = 0, spuntate = [];
   for (var i = 0; i < vals.length; i++) {
     var v = vals[i][0];
-    if (v === true || String(v).trim() === '-') n++;
+    if (v === true || String(v).trim() === '-') {
+      n++;
+      spuntate.push(firstData + i); // numero di riga reale, per poter tornare indietro
+    }
     out.push([false]);
   }
   rng.setValues(out);      // un'unica scrittura, solo la colonna split
   rng.insertCheckboxes();  // garantisce la checkbox (niente testo "false")
-  return { azzerate: n };
+
+  // Prima di questa versione l'operazione era IRREVERSIBILE: toglieva le spunte
+  // senza registrare quali fossero, e l'unico modo di tornare indietro era la
+  // cronologia di Google Sheets. E' successo davvero, su 29 righe. Ora l'elenco
+  // delle righe spuntate viene salvato, cosi' un annullamento le rimette tutte.
+  _ricordaSalda(gid, spuntate);
+
+  return { azzerate: n, annullabile: spuntate.length > 0 };
+}
+
+// ---------- Annullamento dell'ultimo "saldato" ----------
+var _CHIAVE_SALDA = 'ultimoSalda_';
+
+function _ricordaSalda(gid, righe) {
+  try {
+    PropertiesService.getScriptProperties().setProperty(
+      _CHIAVE_SALDA + gid,
+      JSON.stringify({ righe: righe, quando: new Date().toISOString() })
+    );
+  } catch (e) {
+    // Se non si riesce a salvare, l'azzeramento resta valido: si perde solo la
+    // possibilita' di annullarlo, e non vale la pena far fallire tutto.
+  }
+}
+
+// Rimette le spunte tolte dall'ultimo saldaFoglio() su quel foglio.
+function annullaSalda(gid) {
+  var sheet = _getSheetByGid(gid);
+  var h = _findHeader(sheet);
+  var idxSplit = _colFor(h.headers, ['split']);
+  if (idxSplit < 0) throw new Error('Colonna "split" non trovata.');
+
+  var grezzo = PropertiesService.getScriptProperties().getProperty(_CHIAVE_SALDA + gid);
+  if (!grezzo) throw new Error('Nessun azzeramento da annullare su questo foglio.');
+
+  var dati = JSON.parse(grezzo);
+  var righe = (dati && dati.righe) || [];
+  if (!righe.length) throw new Error('L\'ultimo azzeramento non aveva spunte da rimettere.');
+
+  var last = sheet.getLastRow();
+  var rimesse = 0;
+  for (var i = 0; i < righe.length; i++) {
+    var r = righe[i];
+    if (r <= h.row || r > last) continue; // riga non piu' valida: si salta
+    var cella = sheet.getRange(r, idxSplit + 1);
+    cella.insertCheckboxes();
+    cella.setValue(true);
+    rimesse++;
+  }
+
+  // Si consuma: annullare due volte di fila non ha senso e rimetterebbe spunte
+  // su righe che nel frattempo potrebbero essere state cambiate a mano.
+  PropertiesService.getScriptProperties().deleteProperty(_CHIAVE_SALDA + gid);
+
+  return { ok: true, version: VERSION, rimesse: rimesse, quando: dati.quando };
 }
 
 // ---------- Elimina una spesa: svuota la riga, non la rimuove ----------
