@@ -389,10 +389,14 @@
     // La richiesta scaduta continua a occupare la coda, quindi un tetto troppo
     // corto non libera niente, produce solo un falso allarme.
     //
-    // 30 s e' scelto per stare sopra la coda peggiore vista (due letture piu'
-    // la scrittura), restando comunque un limite: serve solo a non lasciare il
-    // pulsante bloccato per sempre se la richiesta si pianta davvero.
-    var TETTO_POST_MS = 30000;
+    // 20 s: misurate su v29, sette scritture su otto si chiudono fra 2,5 e 3,5
+    // secondi anche con una lettura gia' in coda, quindi c'e' sei volte il
+    // margine. Oltre quel punto non conviene continuare ad aspettare: la
+    // verifica sul foglio (?action=cerca) risponde in due secondi e da' una
+    // risposta certa, quindi arrendersi presto porta prima al risultato.
+    // Misurato nel caso peggiore: 20 s di attesa piu' 2 di verifica, contro i
+    // 30 piu' 2 di prima.
+    var TETTO_POST_MS = 20000;
 
     function apiPost(corpo) {
       var ctrl = window.AbortController ? new AbortController() : null;
