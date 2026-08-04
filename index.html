@@ -337,8 +337,14 @@
     // esattamente il "ci mette troppo" che si vedeva.
     // L'ultimo tentativo resta generoso per il caso in cui il calcolo sia
     // davvero freddo e stia solo macinando.
-    var TETTI_MS = [7000, 18000, 45000];
-    var PAUSE_MS = [1500, 3000];
+    // Il primo tetto deve stare COMODAMENTE sopra il tempo di una risposta
+    // buona, non appena sopra. Con 7 s e una lettura che ne impiega 4-6, bastava
+    // una richiesta gia' in coda per farlo scadere, e il ritentativo non
+    // annullava la prima: se ne aggiungeva una seconda, che si accodava alla
+    // prima e peggiorava proprio la congestione che aveva causato il ritardo.
+    // Tre tentativi diventavano tre richieste tutte in fila.
+    var TETTI_MS = [20000, 45000];
+    var PAUSE_MS = [2000];
 
     function apiGet(url, tentativo) {
       tentativo = tentativo || 0;
