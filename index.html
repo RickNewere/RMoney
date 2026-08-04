@@ -542,19 +542,62 @@
     }
     caricaDebito();
 
+    // Pulsante di annullamento, mostrato solo dopo un azzeramento riuscito.
+    // Il backend ricorda quali righe erano spuntate, quindi rimetterle e' una
+    // sola chiamata. Resta disponibile finche' non si ricarica la pagina: un
+    // errore lo si nota subito, e piu' tardi sarebbe rischioso rimettere spunte
+    // su righe che nel frattempo possono essere cambiate.
+    function mostraAnnulla(gidFatto, quante) {
+      var m = document.getElementById('saldaMsg');
+      var b = document.createElement('button');
+      b.className = 'saldaBtn';
+      b.textContent = '↩ Annulla: rimetti le ' + quante + ' spunte';
+      b.addEventListener('click', function () {
+        b.disabled = true;
+        m.className = 'saldaMsg'; m.textContent = 'Ripristino…';
+        apiPost({ op: 'annullaSalda', gid: gidFatto })
+          .then(function (j) {
+            if (j && j.ok) {
+              m.className = 'saldaMsg ok';
+              m.textContent = '✓ Rimesse ' + (j.rimesse || 0) + ' spunte';
+              b.remove();
+              caricaDebito();
+            } else {
+              m.className = 'saldaMsg err';
+              m.textContent = 'Errore: ' + ((j && j.error) || 'sconosciuto');
+              b.disabled = false;
+            }
+          })
+          .catch(function () {
+            m.className = 'saldaMsg err';
+            m.textContent = 'Rete non raggiungibile, riprova';
+            b.disabled = false;
+          });
+      });
+      m.parentNode.insertBefore(b, m.nextSibling);
+    }
+
     // Bottone "saldato": azzera le spunte split del SOLO foglio selezionato.
     document.getElementById('saldaBtn').addEventListener('click', function () {
       var m = document.getElementById('saldaMsg');
-      var ok = confirm('Azzerare tutte le spunte "split" di ' + persona + ' ' + conto + '?\n\n'
-        + 'Le spese restano nel foglio: vengono solo tolte le spunte, quindi non saranno più conteggiate come condivise.');
+      // La conferma dice QUANTO si sta per azzerare, non solo che si sta per
+      // fare qualcosa: un "sei sicuro?" generico si accetta per riflesso, un
+      // numero davanti agli occhi no. E' gia' successo di perdere 29 spunte.
+      var quante = document.getElementById('debtFoglioVal').textContent;
+      var ok = confirm('Azzerare le spunte "split" di ' + persona + ' ' + conto + '?\n\n'
+        + 'Riguarda ' + quante + ' di spese condivise.\n\n'
+        + 'Le spese restano nel foglio: vengono tolte solo le spunte, quindi non '
+        + 'saranno più conteggiate come condivise. Dopo avrai un pulsante per annullare.');
       if (!ok) return;
       var btn = this;
       btn.disabled = true; m.className = 'saldaMsg'; m.textContent = 'Azzeramento…';
       apiPost({ op: 'salda', gid: gid() })
         .then(function (j) {
           if (j && j.ok) {
+            var gidFatto = gid();
             caricaDebito(); // ricalcola prima (azzera saldaMsg internamente)
             m.className = 'saldaMsg ok'; m.textContent = '✓ Azzerate ' + (j.azzerate || 0) + ' spunte';
+            if (j.annullabile) mostraAnnulla(gidFatto, j.azzerate || 0);
           } else {
             m.className = 'saldaMsg err'; m.textContent = 'Errore: ' + ((j && j.error) || 'sconosciuto');
           }
