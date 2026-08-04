@@ -402,12 +402,23 @@
         onPick(b.getAttribute('data-v'));
       });
     }
-    initSeg('persona', function (v) { persona = v; caricaCategorie(); caricaDebito(); });
+    // Cambiare persona o conto ridisegna e basta: i quattro totali sono gia'
+    // arrivati con l'unica lettura di ?action=debiti. Qui c'era una richiesta al
+    // backend per ogni tocco, ed e' quello che rendeva lento passare da un tab
+    // all'altro (soprattutto sull'euro, i due fogli piu' grossi).
+    function cambiaTab() {
+      // L'esito di un "Saldato" riguarda il foglio su cui e' stato premuto:
+      // lasciarlo in piedi cambiando tab lo farebbe leggere come se riguardasse
+      // quello nuovo.
+      document.getElementById('saldaMsg').textContent = '';
+      caricaCategorie();
+      mostraDebito();
+    }
+    initSeg('persona', function (v) { persona = v; cambiaTab(); });
     initSeg('conto', function (v) {
       conto = v;
       document.getElementById('labImporto').textContent = 'Importo (' + (v === 'Euro' ? '€' : 'CHF') + ')';
-      caricaCategorie();
-      caricaDebito();
+      cambiaTab();
     });
 
     document.getElementById('check').addEventListener('click', function () {
@@ -507,94 +518,104 @@
     // ---- Debito condiviso (righe con la spunta split) ----
     // Nessun helper che legga persona/conto globali: il rendering deve usare
     // solo la fotografia presa quando la richiesta e' partita (vedi caricaDebito).
-    var debitoReq = 0; // token: solo l'ultima richiesta puo' renderizzare
+    // Una richiesta sola porta i totali di TUTTI E QUATTRO i fogli
+    // (?action=debiti). Cambiare persona o conto non fa piu' partire niente:
+    // il numero e' gia' arrivato.
+    //
+    // Non e' una cache. I quattro totali sono letti dal foglio nello stesso
+    // istante, non vengono salvati da nessuna parte e non sopravvivono alla
+    // chiusura della pagina. Prima invece ogni cambio di tab costava un giro
+    // completo sul backend, e se il precedente era ancora in volo si accodavano:
+    // Apps Script serializza le richieste dello stesso utente, quindi la seconda
+    // aspettava la prima e a volte scadeva. Sul telefono si e' visto anche
+    // peggio, con la lettura dell'euro fallita due volte di fila mentre la
+    // pagina caricava le sue.
+    var fogliDebito = null;  // ultimo giro di letture, solo in memoria
 
-    function caricaDebito() {
+    // Rende la card con quello che c'e', senza toccare la rete.
+    function mostraDebito() {
       var foglioLbl = document.getElementById('debtFoglioLbl');
       var foglioVal = document.getElementById('debtFoglioVal');
       var netLbl = document.getElementById('debtNetLbl');
       var netVal = document.getElementById('debtNetVal');
       var saldaBtn = document.getElementById('saldaBtn');
 
-      // Fotografia di persona/conto AL MOMENTO DELLA RICHIESTA. Senza questa, il
-      // rendering leggeva le variabili correnti e cambiando tab in fretta si
-      // vedevano i numeri di un foglio con le etichette e la valuta di un altro.
-      var myReq = ++debitoReq;
-      var pReq = persona, cReq = conto;
-      var altraReq = pReq === 'Riccardo' ? 'Roberta' : 'Riccardo';
-      var simbReq = cReq === 'Euro' ? '€' : 'CHF';
-      function fmtReq(n) {
-        return fmtImporto(n, simbReq);
+      var altra = persona === 'Riccardo' ? 'Roberta' : 'Riccardo';
+      var simb = conto === 'Euro' ? '€' : 'CHF';
+
+      foglioLbl.textContent = altra + ' deve a ' + persona;
+      netLbl.textContent = 'Saldo netto ' + conto;
+      saldaBtn.textContent = 'Saldato · azzera split ' + persona + ' ' + conto;
+      // Il messaggio del "Saldato" NON si tocca qui: questa funzione gira anche
+      // quando la lettura finisce, e cancellerebbe l'esito appena scritto
+      // ("Azzerate N spunte") un attimo dopo averlo mostrato.
+
+      // Finche' non sono arrivati i numeri non si salda: azzerare le spunte
+      // senza aver visto il totale vero sarebbe irreversibile alla cieca.
+      if (!fogliDebito) {
+        saldaBtn.disabled = true;
+        foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
+        netVal.textContent = '…'; netVal.className = 'debtVal';
+        return;
+      }
+      if (fogliDebito === 'errore') {
+        saldaBtn.disabled = true;
+        foglioVal.textContent = 'non caricato, riprova';
+        foglioVal.className = 'debtVal zero';
+        netVal.textContent = '';
+        return;
       }
 
-      var mioGid = TABS[pReq][cReq];
+      var mio = fogliDebito[TABS[persona][conto]] || { meta: 0 };
+      var suo = fogliDebito[TABS[altra][conto]] || { meta: 0 };
+      saldaBtn.disabled = false;
 
-      foglioLbl.textContent = altraReq + ' deve a ' + pReq;
-      netLbl.textContent = 'Saldo netto ' + cReq;
-      saldaBtn.textContent = 'Saldato · azzera split ' + pReq + ' ' + cReq;
-      // Disabilitato finche' i dati non sono quelli del foglio mostrato, cosi'
-      // non si puo' saldare guardando numeri di un altro tab.
-      saldaBtn.disabled = true;
+      // Meta condivisa di questo foglio (quanto l'altra persona deve).
+      if (mio.meta > 0.005) {
+        foglioVal.textContent = fmtImporto(mio.meta, simb);
+        foglioVal.className = 'debtVal';
+      } else {
+        foglioVal.textContent = 'nessuna spesa condivisa';
+        foglioVal.className = 'debtVal zero';
+      }
+
+      // Saldo netto per valuta: meta(mio) - meta(partner).
+      var netto = mio.meta - suo.meta;
+      var abs = Math.abs(netto);
+      if (abs < 0.005) {
+        netVal.textContent = 'in pari';
+        netVal.className = 'debtVal zero';
+      } else {
+        var chi = netto > 0 ? altra : persona;
+        var aChi = netto > 0 ? persona : altra;
+        netLbl.textContent = chi + ' deve a ' + aChi + ' (' + conto + ')';
+        netVal.textContent = fmtImporto(abs, simb);
+        netVal.className = 'debtVal';
+      }
+    }
+
+    // Rilegge i quattro totali dal foglio. Da chiamare all'avvio e dopo ogni
+    // scrittura che tocca le spunte, non a ogni cambio di tab.
+    var debitoReq = 0; // token: solo l'ultima lettura puo' scrivere il risultato
+
+    function caricaDebito() {
+      var mio = ++debitoReq;
+      fogliDebito = null;
       document.getElementById('saldaMsg').textContent = '';
-
-      // Si aspetta il dato del foglio. NON si mostra piu' l'ultimo valore
-      // salvato in locale.
-      //
-      // Quella scorciatoia esisteva perche' il backend impiegava anche 45
-      // secondi, e serviva a non lasciare l'app con due trattini per tutto quel
-      // tempo. Il prezzo pero' era che ogni dispositivo mostrava la propria
-      // copia, presa quando aveva guardato l'ultima volta: iPhone, Samsung e
-      // Pixel finivano per dire tre cifre diverse dello stesso debito (viste
-      // 360,23 contro 359,23 in euro e 362,23 contro 360,23). Un debito
-      // condiviso che non combacia fra chi lo guarda e' peggio di un debito che
-      // ci mette un secondo a comparire.
-      foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
-      netVal.textContent = '…'; netVal.className = 'debtVal';
-
-      function mostraDebito(d) {
-        if (!d || !d.mio) { foglioVal.textContent = '—'; netVal.textContent = '—'; return; }
-
-          // Meta condivisa di questo foglio (quanto l'altra persona deve).
-          if (d.mio.meta > 0.005) {
-            foglioVal.textContent = fmtReq(d.mio.meta);
-            foglioVal.className = 'debtVal';
-          } else {
-            foglioVal.textContent = 'nessuna spesa condivisa';
-            foglioVal.className = 'debtVal zero';
-          }
-
-        // Saldo netto per valuta: meta(mio) - meta(partner).
-        var netto = d.netto || 0;
-        var abs = Math.abs(netto);
-        if (abs < 0.005) {
-          netLbl.textContent = 'Saldo netto ' + cReq;
-          netVal.textContent = 'in pari';
-          netVal.className = 'debtVal zero';
-        } else {
-          var chi = netto > 0 ? altraReq : pReq;
-          var aChi = netto > 0 ? pReq : altraReq;
-          netLbl.textContent = chi + ' deve a ' + aChi + ' (' + cReq + ')';
-          netVal.textContent = fmtReq(abs);
-          netVal.className = 'debtVal';
-        }
-      }
-
-      apiGet(API + '?action=debito&gid=' + mioGid + '&gidPartner=' + TABS[altraReq][cReq])
+      mostraDebito();
+      return apiGet(API + '?action=debiti')
         .then(function (j) {
-          if (myReq !== debitoReq) return; // risposta superata da una piu' recente
-          saldaBtn.disabled = false;
-          mostraDebito(j && j.debito);
+          if (mio !== debitoReq) return; // superata da una lettura piu' recente
+          if (!j || !j.fogli) throw new Error('risposta senza i totali');
+          fogliDebito = j.fogli;
+          mostraDebito();
         })
         .catch(function () {
-          if (myReq !== debitoReq) return;
+          if (mio !== debitoReq) return;
           // Meglio dire che non si sa, che mostrare un numero di ieri: su questo
           // numero si decide chi paga, e uno sbagliato e' peggio di nessuno.
-          // Il pulsante "Saldato" resta bloccato: non si azzerano le spunte
-          // senza aver visto il totale vero.
-          foglioVal.textContent = 'non caricato, riprova';
-          foglioVal.className = 'debtVal zero';
-          netVal.textContent = '';
-          netLbl.textContent = 'Saldo netto ' + cReq;
+          fogliDebito = 'errore';
+          mostraDebito();
         });
     }
 
