@@ -38,16 +38,24 @@ Backend column handling (important — the sheets are not plain tables):
 - The spreadsheet has a **hidden sheet** "Tabelle brutte che nessuno vuole vedere" (gid `1943088578`, constant `GID_PIVOT`) holding the source pivots for the SOMMARIO charts, including the monthly "Andamento Risparmi" series (euro table first, CHF table second). `?action=riepilogo` reads the andamento from here.
 ### What actually costs time on a write
 
-**Every mutation makes the whole spreadsheet recalculate** (the SOMMARIO tabs and the pivot read the LOG tabs), so the write cost tracks the **number** of sheet operations, not how much data is read. Reads are comparatively cheap. Measured against the live v24 deployment on LOG RICCARDO, script execution time only, redirect leg excluded:
-
-| | v24 | v25 |
-|---|---|---|
-| insert, no tick | 4,58 s | see below |
-| insert, shared tick | **29,00 s** | see below |
+**Every mutation makes the whole spreadsheet recalculate** (the SOMMARIO tabs and the pivot read the LOG tabs), so the write cost tracks the **number** of sheet operations, not how much data is read. Reads are comparatively cheap.
 
 v24 performed ten mutations per insert: write the row, copy the format, set the date format, insert the checkbox, set its value, sort the whole tail, remove every checkbox, clear the column, re-insert every checkbox, write the column back. v25 does **four** (copy format, date format, one `insertCheckboxes`, one `setValues`) and usually rewrites a single row. Delete went from six to two. **Do not reintroduce a per-write operation without measuring it** — this is the failure mode that made the app unusable, and it is invisible in the code because each individual call looks harmless.
 
-`aggiungiSpesa` returns `ms` and `passi` (per-step timings) in its JSON. Read those first when a write feels slow; they separate "the script is slow" from "Apps Script is queueing", which look identical from outside.
+Measured on the live deployment, one real expense inserted and then deleted on each tab, 04/08/2026. "script" is what `aggiungiSpesa` reports in its own `ms` field; "totale" is what the client waits for, both legs of the HTTP round trip:
+
+| tab | insert, no tick | insert, shared tick |
+|---|---|---|
+| LOG RICCARDO (€) | 2,81 s (script 1,44 s) | 3,02 s (script 1,55 s) |
+| LOG ROBERTA (€) | 3,66 s (script 1,76 s) | 4,05 s (script 2,17 s) |
+| LOG RICCARDO CHF | 3,32 s (script 1,77 s) | 3,58 s (script 1,73 s) |
+| LOG ROBERTA CHF | 2,88 s (script 1,04 s) | 3,80 s (script 1,72 s) |
+
+For comparison, v24 on LOG RICCARDO: 4,58 s without the tick and **29,00 s** with it, script execution alone. The tick itself costs nothing — the two cases now differ by a couple of hundred milliseconds.
+
+`aggiungiSpesa` returns `ms` and `passi` (per-step timings) in its JSON. Read those first when a write feels slow; they separate "the script is slow" from "Apps Script is queueing", which look identical from outside. Typical shape of `passi`: `foglio ~300, intestazioni ~350, lettura coda ~250, formato ~15, caselle ~180, scrittura ~270`. Roughly half of that is `openById` plus the header scan, i.e. fixed overhead before any work happens.
+
+**Do not measure by firing requests back to back.** Apps Script serializes executions per user and Google throttles the retrieval leg: two POSTs in a row measured 1,1 s of script time but 9,9 s of HTTP. Leave 20-25 s between calls to measure what a person actually experiences.
 
 - **Tail-only date ordering.** `SORT_FROM` maps each LOG gid to the first row the app is allowed to reorder, frozen on 27/07/2026 at that sheet's then-last row + 1 (Riccardo € 775, Roberta € 565, Riccardo CHF 105, Roberta CHF 106). Everything above the threshold is never read or moved: the history keeps whatever order it already had, which is **not** chronological (a sample of 122 rows had 9 date inversions), so the sheet as a whole will never become fully sorted — that was the accepted trade-off for not disturbing existing rows. Do not recompute these thresholds: raising them abandons rows already being sorted, lowering them reshuffles the frozen history.
   - **Since v25 nothing is sorted on write.** `aggiungiSpesa` reads the tail once, works out in memory where the row belongs by date, and rewrites only from the first row that actually changes. A same-day expense therefore touches exactly one row; a back-dated one shifts the few rows below it. Equal dates keep insertion order (the scan takes the first strictly-greater date), so the newest of a day sits last.
@@ -73,7 +81,7 @@ The `VERSION` constant in Codice.gs is a deliberate marker: bump it and check an
 
 Current live URL (answered **v24** before the v25 redeploy): `https://script.google.com/macros/s/AKfycbyS6FWBiSglQWJ_3ft0BAkeEcOCwSdgYKo5yZGvsMrXA25iDB1a7iiwDNt9sWbY4-oQ7Q/exec`. Check it with `?action=debug&gid=113020932` rather than trusting this line.
 
-**A `/exec` request is two legs.** The first is the script running (`POST /exec` answers 302); the second is fetching the result from `script.googleusercontent.com`. Timing them separately is the only way to tell a slow script from a struggling Apps Script: measured here, execution 29 s with the retrieval a further 9 s. Under load the second leg can return an **HTTP 404 HTML page** even though the write went through — that is what surfaces in the app as "risposta non valida, controllo il foglio…", and it is why the client verifies on the sheet instead of resending.
+**A `/exec` request is two legs.** The first is the script running (`POST /exec` answers 302); the second is fetching the result from `script.googleusercontent.com`. Timing them separately is the only way to tell a slow script from a struggling Google: measured on v25, one insert ran in **2,13 s** while the retrieval took **31,50 s** and then returned an HTTP **404 HTML page in German** — and the row was on the sheet. This is not hypothetical and it is not the script: it was reproduced repeatedly, and every time the expense had been written. It is what surfaces in the app as "risposta non valida, controllo il foglio…", and it is exactly why the client verifies on the sheet instead of resending. Never "fix" a lost response by retrying a write.
 
 **A new URL means editing THREE files, not two:** `RMoney-web/index.html` (the `API` constant), `RMoney-web/api.json` (read at runtime by the Android widget), and `config.js`. Miss `api.json` and the app works while the widget silently keeps talking to the archived deployment.
 
