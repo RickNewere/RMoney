@@ -7,6 +7,7 @@ import { WebView } from 'react-native-webview';
 
 import { aggiornaWidget } from './widgets/aggiorna';
 import { registraAttivitaPeriodica } from './widgets/attivitaPeriodica';
+import { chiediEsenzioneBatteria } from './widgets/esenzioneBatteria';
 
 // The Android app is a thin shell around the live web app, so both clients
 // stay identical and future web updates require no APK rebuild.
@@ -56,6 +57,9 @@ export default function App() {
 
   useEffect(function () {
     registraAttivitaPeriodica();
+    // Dopo qualche secondo, per non sovrapporre un dialogo all'apertura.
+    const t = setTimeout(chiediEsenzioneBatteria, 4000);
+    return function () { clearTimeout(t); };
   }, []);
 
   useEffect(function () {

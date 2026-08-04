@@ -14,7 +14,20 @@ import { leggiCacheDebito, leggiDebito } from './debitoData';
 // possono capitare a distanza di un istante: senza questa guardia partivano
 // letture sovrapposte che si ostacolavano a vicenda.
 let inCorso = null;
+let inizioCorso = 0;
 let ultimo = 0;
+
+// Oltre questo tempo un aggiornamento "in corso" si considera piantato.
+//
+// Senza questo limite la guardia anti-sovrapposizione si trasformava nel guasto
+// peggiore possibile: bastava che una lettura non si concludesse mai perche'
+// inCorso restasse pieno per sempre, e da quel momento OGNI aggiornamento
+// successivo veniva scartato. Nel log si leggeva "aggiornamento gia' in corso,
+// salto: lavoro periodico" mentre il widget restava fermo per ore.
+//
+// Il tetto e' generoso rispetto ai tempi veri (euro ~3 s, franchi ~10 s, piu'
+// i ritentativi): serve solo a impedire il blocco permanente.
+const SCADENZA_CORSO_MS = 120000;
 
 // Distanza minima fra due aggiornamenti spontanei. Apre e chiudi l'app e sono
 // gia' due letture a pochi secondi l'una dall'altra; sommate al lavoro
@@ -34,21 +47,33 @@ const SEMPRE = ['scrittura sul foglio', 'tocco', 'avvio'];
 
 export function aggiornaWidget(motivo) {
   if (inCorso) {
-    console.log('[RMoney] aggiornamento gia\' in corso, salto: ' + motivo);
-    return inCorso;
+    const da = Date.now() - inizioCorso;
+    if (da < SCADENZA_CORSO_MS) {
+      console.log('[RMoney] aggiornamento in corso da ' + Math.round(da / 1000)
+        + 's, salto: ' + motivo);
+      return inCorso;
+    }
+    // Piantato: lo si abbandona invece di restare bloccati per sempre.
+    console.log('[RMoney] aggiornamento piantato da ' + Math.round(da / 1000)
+      + 's, lo abbandono e riparto: ' + motivo);
+    inCorso = null;
   }
+
   const eta = Date.now() - ultimo;
   if (ultimo && eta < DISTANZA_MIN_MS && SEMPRE.indexOf(motivo) < 0) {
     console.log('[RMoney] aggiornato da ' + Math.round(eta / 1000) + 's, salto: ' + motivo);
     return Promise.resolve();
   }
+
   ultimo = Date.now();
-  inCorso = aggiornaOra(motivo);
-  inCorso.then(
-    function () { inCorso = null; },
-    function () { inCorso = null; }
-  );
-  return inCorso;
+  inizioCorso = Date.now();
+  const mio = aggiornaOra(motivo);
+  inCorso = mio;
+  // Solo chi e' ancora il corrente si azzera: un aggiornamento abbandonato che
+  // finisce tardi non deve cancellare quello che nel frattempo l'ha sostituito.
+  const libera = function () { if (inCorso === mio) inCorso = null; };
+  mio.then(libera, libera);
+  return mio;
 }
 
 // Due passate.
@@ -62,14 +87,19 @@ export function aggiornaWidget(motivo) {
 // La seconda passata rifa' il disegno con i dati freschi appena arrivano.
 async function aggiornaOra(motivo) {
   console.log('[RMoney] aggiorno widget: ' + motivo);
+  try {
+    const cache = await leggiCacheDebito();
+    if (cache) {
+      await disegnaTutti(motivo + '/cache', cache);
+    }
 
-  const cache = await leggiCacheDebito();
-  if (cache) {
-    await disegnaTutti(motivo + '/cache', cache);
+    const fresco = await leggiDebito();
+    await disegnaTutti(motivo + '/rete', fresco);
+  } catch (e) {
+    // Deve concludersi comunque: un'eccezione che sfugge lascerebbe la promise
+    // rifiutata e, prima della scadenza, bloccherebbe gli aggiornamenti dopo.
+    console.log('[RMoney] aggiornamento fallito (' + motivo + '): ' + e);
   }
-
-  const fresco = await leggiDebito();
-  await disegnaTutti(motivo + '/rete', fresco);
 }
 
 function disegnaTutti(fase, debito) {
