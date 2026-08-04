@@ -332,7 +332,10 @@
       // Tetto sul singolo tentativo: misurato, sotto carico Apps Script arriva
       // a rispondere dopo 33 secondi, e senza limite la pagina resta appesa.
       var ctrl = window.AbortController ? new AbortController() : null;
-      var scaduto = setTimeout(function () { if (ctrl) ctrl.abort(); }, 30000);
+      // 50 s: misurata una risposta corretta arrivata dopo 45. Con 30 la si
+      // buttava via proprio quando stava per arrivare. Non e' un problema di
+      // attesa percepita, perche' i dati noti sono gia' a schermo.
+      var scaduto = setTimeout(function () { if (ctrl) ctrl.abort(); }, 50000);
       return fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
         .then(leggiRisposta)
         .then(function (j) { clearTimeout(scaduto); return j; })
@@ -492,22 +495,30 @@
         return fmtImporto(n, simbReq);
       }
 
+      var mioGid = TABS[pReq][cReq];
+
       foglioLbl.textContent = altraReq + ' deve a ' + pReq;
       netLbl.textContent = 'Saldo netto ' + cReq;
-      foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
-      netVal.textContent = '…'; netVal.className = 'debtVal';
       saldaBtn.textContent = 'Saldato · azzera split ' + pReq + ' ' + cReq;
       // Disabilitato finche' i dati non sono quelli del foglio mostrato, cosi'
       // non si puo' saldare guardando numeri di un altro tab.
       saldaBtn.disabled = true;
       document.getElementById('saldaMsg').textContent = '';
 
-      apiGet(API + '?action=debito&gid=' + TABS[pReq][cReq] + '&gidPartner=' + TABS[altraReq][cReq])
-        .then(function (j) {
-          if (myReq !== debitoReq) return; // risposta superata da una piu' recente
-          saldaBtn.disabled = false;
-          var d = j && j.debito;
-          if (!d || !d.mio) { foglioVal.textContent = '—'; netVal.textContent = '—'; return; }
+      // Ultimo valore letto, mostrato subito. Il backend sotto carico impiega
+      // anche 45 secondi o risponde con una pagina di errore, e lasciare due
+      // trattini (o "(errore)") per tutto quel tempo fa sembrare l'app rotta
+      // quando invece il dato lo conosciamo gia'.
+      var vecchio = leggiDebitoSalvato(mioGid);
+      if (vecchio) {
+        mostraDebito(vecchio, true);
+      } else {
+        foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
+        netVal.textContent = '…'; netVal.className = 'debtVal';
+      }
+
+      function mostraDebito(d, daCache) {
+        if (!d || !d.mio) { foglioVal.textContent = '—'; netVal.textContent = '—'; return; }
 
           // Meta condivisa di questo foglio (quanto l'altra persona deve).
           if (d.mio.meta > 0.005) {
@@ -518,28 +529,59 @@
             foglioVal.className = 'debtVal zero';
           }
 
-          // Saldo netto per valuta: meta(mio) - meta(partner).
-          var netto = d.netto || 0;
-          var abs = Math.abs(netto);
-          if (abs < 0.005) {
-            netLbl.textContent = 'Saldo netto ' + cReq;
-            netVal.textContent = 'in pari';
-            netVal.className = 'debtVal zero';
-          } else {
-            var chi = netto > 0 ? altraReq : pReq;
-            var aChi = netto > 0 ? pReq : altraReq;
-            netLbl.textContent = chi + ' deve a ' + aChi + ' (' + cReq + ')';
-            netVal.textContent = fmtReq(abs);
-            netVal.className = 'debtVal';
-          }
+        // Saldo netto per valuta: meta(mio) - meta(partner).
+        var netto = d.netto || 0;
+        var abs = Math.abs(netto);
+        if (abs < 0.005) {
+          netLbl.textContent = 'Saldo netto ' + cReq + (daCache ? ' · ultimo noto' : '');
+          netVal.textContent = 'in pari';
+          netVal.className = 'debtVal zero';
+        } else {
+          var chi = netto > 0 ? altraReq : pReq;
+          var aChi = netto > 0 ? pReq : altraReq;
+          netLbl.textContent = chi + ' deve a ' + aChi + ' (' + cReq + ')'
+            + (daCache ? ' · ultimo noto' : '');
+          netVal.textContent = fmtReq(abs);
+          netVal.className = 'debtVal';
+        }
+      }
+
+      apiGet(API + '?action=debito&gid=' + mioGid + '&gidPartner=' + TABS[altraReq][cReq])
+        .then(function (j) {
+          if (myReq !== debitoReq) return; // risposta superata da una piu' recente
+          saldaBtn.disabled = false;
+          var d = j && j.debito;
+          if (d && d.mio) salvaDebito(mioGid, d);
+          mostraDebito(d, false);
         })
         .catch(function () {
           if (myReq !== debitoReq) return;
-          saldaBtn.disabled = false;
+          // Con un valore gia' a schermo non si scrive "(errore)": cancellare
+          // un numero corretto per sostituirlo con una parola e' un
+          // peggioramento. Si lascia il dato, marcato come ultimo noto.
+          if (vecchio) { saldaBtn.disabled = false; return; }
           foglioVal.textContent = '(errore)'; foglioVal.className = 'debtVal zero';
           netVal.textContent = '';
         });
     }
+
+    // Il saldo va tenuto per foglio: sono quattro combinazioni persona/conto e
+    // mostrare quello sbagliato sarebbe peggio che non mostrarne nessuno.
+    function chiaveDebito(g) { return 'rmoney_debito_' + g; }
+
+    function leggiDebitoSalvato(g) {
+      try {
+        var s = localStorage.getItem(chiaveDebito(g));
+        var v = s ? JSON.parse(s) : null;
+        return (v && v.mio) ? v : null;
+      } catch (e) { return null; }
+    }
+
+    function salvaDebito(g, d) {
+      try { localStorage.setItem(chiaveDebito(g), JSON.stringify(d)); }
+      catch (e) { /* spazio pieno o modalita' privata: pazienza */ }
+    }
+
     caricaDebito();
 
     // Pulsante di annullamento, mostrato solo dopo un azzeramento riuscito.
