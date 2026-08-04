@@ -370,7 +370,13 @@
     // e chi chiama va a controllare sul foglio se la scrittura era passata
     // (verificaSpesaScritta), che e' l'unico modo sicuro di uscire dal dubbio
     // senza rischiare un doppione.
-    var TETTO_POST_MS = 25000;
+    //
+    // Da quando il backend scrive con una sola operazione (v25) una scrittura
+    // sana si chiude in un paio di secondi. Il tetto era 25 s, tarato sui tempi
+    // vecchi: restare in attesa venti secondi oltre il dovuto non recupera
+    // niente, tiene solo il pulsante bloccato. Sopra i 15 s si va a controllare
+    // il foglio, che e' comunque la strada che porta a una risposta certa.
+    var TETTO_POST_MS = 15000;
 
     function apiPost(corpo) {
       var ctrl = window.AbortController ? new AbortController() : null;
