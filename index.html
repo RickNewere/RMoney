@@ -594,6 +594,38 @@
       }
     }
 
+    // La pagina su GitHub Pages e il backend su Apps Script non cambiano nello
+    // stesso istante: la pagina resta in cache una decina di minuti, e il
+    // backend si aggiorna a mano. Quindi una versione nuova della pagina puo'
+    // benissimo trovarsi davanti un backend vecchio. Se non conosce
+    // ?action=debiti risponde con il suo JSON informativo, senza "fogli": in
+    // quel caso si ripiega sulle due letture per valuta, che esistono da
+    // sempre. Senza questo la card resterebbe su "non caricato" fino al deploy.
+    function leggiTuttiIDebiti() {
+      return apiGet(API + '?action=debiti').then(function (j) {
+        if (j && j.fogli) return j.fogli;
+        return leggiDebitiPerValuta();
+      });
+    }
+
+    function leggiDebitiPerValuta() {
+      var fogli = {};
+      // In sequenza, mai insieme: Apps Script serializza le richieste dello
+      // stesso utente e lanciarle in parallelo le fa scadere a vicenda.
+      return ['Euro', 'Franchi'].reduce(function (prima, c) {
+        return prima.then(function () {
+          return apiGet(API + '?action=debito&gid=' + TABS.Riccardo[c]
+            + '&gidPartner=' + TABS.Roberta[c])
+            .then(function (j) {
+              var d = j && j.debito;
+              if (!d || !d.mio) throw new Error('risposta senza il debito');
+              fogli[TABS.Riccardo[c]] = d.mio;
+              fogli[TABS.Roberta[c]] = d.partner;
+            });
+        });
+      }, Promise.resolve()).then(function () { return fogli; });
+    }
+
     // Rilegge i quattro totali dal foglio. Da chiamare all'avvio e dopo ogni
     // scrittura che tocca le spunte, non a ogni cambio di tab.
     var debitoReq = 0; // token: solo l'ultima lettura puo' scrivere il risultato
@@ -603,11 +635,10 @@
       fogliDebito = null;
       document.getElementById('saldaMsg').textContent = '';
       mostraDebito();
-      return apiGet(API + '?action=debiti')
-        .then(function (j) {
+      return leggiTuttiIDebiti()
+        .then(function (fogli) {
           if (mio !== debitoReq) return; // superata da una lettura piu' recente
-          if (!j || !j.fogli) throw new Error('risposta senza i totali');
-          fogliDebito = j.fogli;
+          fogliDebito = fogli;
           mostraDebito();
         })
         .catch(function () {
