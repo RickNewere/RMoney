@@ -1104,6 +1104,70 @@ function svuotaRiga(gid, riga, atteso) {
   };
 }
 
+// ---------- Recupero delle spunte da una copia del foglio ----------
+// Serve quando le spunte "split" sono state perse e non c'e' un annullamento
+// da usare (per esempio perche' l'azzeramento e' avvenuto con una versione del
+// backend che non le registrava).
+//
+// Procedura:
+//   1. Nel foglio: File > Cronologia versioni > Mostra cronologia versioni.
+//   2. Scegli una versione precedente alla perdita, tre puntini, "Crea una copia".
+//   3. Apri la copia e prendi il suo ID dall'URL (la parte fra /d/ e /edit).
+//   4. Qui nell'editor esegui: ripristinaSplitDaCopia('ID_DELLA_COPIA')
+//
+// I fogli sono accoppiati per NOME, non per gid, perche' una copia ha gid suoi.
+// L'operazione e' ADDITIVA: mette le spunte dove la copia ce l'aveva e non
+// toglie nulla, quindi non puo' cancellare spese o spunte messe nel frattempo.
+function ripristinaSplitDaCopia(idCopia, soloTab) {
+  if (!idCopia) throw new Error('Serve l\'ID della copia del foglio.');
+  var copia = SpreadsheetApp.openById(idCopia);
+  var esito = [];
+
+  Object.keys(SORT_FROM).forEach(function (k) {
+    var gid = parseInt(k, 10);
+    var vivo = _getSheetByGid(gid);
+    var nome = vivo.getName();
+    if (soloTab && nome !== soloTab) return;
+
+    var vecchio = copia.getSheetByName(nome);
+    if (!vecchio) { esito.push(nome + ': non presente nella copia'); return; }
+
+    var h = _findHeader(vivo);
+    var idxSplit = _colFor(h.headers, ['split']);
+    if (idxSplit < 0) { esito.push(nome + ': colonna split assente'); return; }
+
+    var hv = _findHeader(vecchio);
+    var idxSplitV = _colFor(hv.headers, ['split']);
+    if (idxSplitV < 0) { esito.push(nome + ': colonna split assente nella copia'); return; }
+
+    var daRiga = h.row + 1;
+    var quante = Math.min(
+      vivo.getLastRow() - daRiga + 1,
+      vecchio.getLastRow() - (hv.row + 1) + 1
+    );
+    if (quante < 1) { esito.push(nome + ': nessuna riga da confrontare'); return; }
+
+    var vecchie = vecchio.getRange(hv.row + 1, idxSplitV + 1, quante, 1).getValues();
+    var col = vivo.getRange(daRiga, idxSplit + 1, quante, 1);
+    var attuali = col.getValues();
+
+    var nuovi = [], rimesse = 0;
+    for (var i = 0; i < quante; i++) {
+      var eraSpuntata = vecchie[i][0] === true || String(vecchie[i][0]).trim() === '-';
+      var eSpuntata = attuali[i][0] === true;
+      if (eraSpuntata && !eSpuntata) rimesse++;
+      nuovi.push([eSpuntata || eraSpuntata]);
+    }
+
+    col.insertCheckboxes();
+    col.setValues(nuovi);
+    esito.push(nome + ': rimesse ' + rimesse + ' spunte su ' + quante + ' righe');
+  });
+
+  Logger.log(esito.join('\n'));
+  return esito;
+}
+
 // ---------- Manutenzione una-tantum: ripulisce i residui ----------
 // Toglie le checkbox rimaste sulle righe vuote in coda ai quattro fogli. Serve
 // solo a ripulire cio' che le versioni fino alla v20 lasciavano dietro: da v21
