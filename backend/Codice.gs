@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v26';
+var VERSION = 'v27';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -326,7 +326,6 @@ function aggiungiSpesa(dati) {
     _copiaFormatoRiga(sheet, h.row + 1, rSemplice, lastCol);
     if (idxSplit >= 0) sheet.getRange(rSemplice, idxSplit + 1).insertCheckboxes();
     c.passo('scrittura');
-    _scadeCacheDebito(gid);
     return _esito(rSemplice, c);
   }
 
@@ -409,7 +408,6 @@ function aggiungiSpesa(dati) {
     c.passo('pulizia coda');
   }
 
-  _scadeCacheDebito(gid);
   return _esito(rigaNuova, c);
 }
 
@@ -635,6 +633,14 @@ function _isCondivisa(row, idxSplit, idxNota, lastCol) {
   return false;
 }
 
+// Legge SOLO le colonne che servono al totale.
+//
+// Prima leggeva l'intera larghezza del foglio: su LOG RICCARDO sono 25 colonne
+// per 780 righe, cioe' 19.500 celle, di cui ne servono due (importo e spunta).
+// Il resto e' vuoto e veniva trasferito e convertito comunque. Restringere la
+// lettura al tratto importo-spunta porta il blocco a 4 colonne, un quinto dei
+// dati, ed e' quello che permette di rispondere sempre col dato vero del foglio
+// invece che con una copia tenuta da parte.
 function _totaleCondivise(gid) {
   var sheet = _getSheetByGid(gid);
   var h = _findHeader(sheet);
@@ -652,12 +658,29 @@ function _totaleCondivise(gid) {
   var last = sheet.getLastRow();
   if (last < firstData) return { totale: 0, meta: 0, conteggio: 0 };
 
-  var vals = sheet.getRange(firstData, 1, last - firstData + 1, lastCol).getValues();
+  // Senza colonna split vale ancora il vecchio marcatore "-", che puo' stare in
+  // una qualsiasi colonna a destra della nota: in quel caso il blocco resta largo.
+  var primaC, ultimaC;
+  if (idxSplit >= 0) {
+    primaC = Math.min(idxSpesa, idxSplit);
+    ultimaC = Math.max(idxSpesa, idxSplit);
+  } else {
+    primaC = Math.min(idxSpesa, idxNota + 1);
+    ultimaC = lastCol - 1;
+  }
+
+  var vals = sheet.getRange(firstData, primaC + 1, last - firstData + 1, ultimaC - primaC + 1)
+    .getValues();
+  var cSpesa = idxSpesa - primaC;
+  var cSplit = idxSplit >= 0 ? idxSplit - primaC : -1;
+  var cNota = idxNota - primaC;
+  var larghezza = ultimaC - primaC + 1;
+
   var tot = 0, cnt = 0;
   for (var i = 0; i < vals.length; i++) {
     var row = vals[i];
-    if (!_isCondivisa(row, idxSplit, idxNota, lastCol)) continue;
-    var v = row[idxSpesa];
+    if (!_isCondivisa(row, cSplit, cNota, larghezza)) continue;
+    var v = row[cSpesa];
     var n = (typeof v === 'number')
       ? v
       : parseFloat(String(v).replace(/[^0-9,.\-]/g, '').replace(',', '.'));
@@ -715,94 +738,27 @@ function elencoCondivise(gid) {
 // della stessa valuta. netto = meta(mio) - meta(partner):
 //   > 0  -> la persona del foglio partner deve alla persona del foglio "mio"
 //   < 0  -> viceversa
-// Il calcolo scorre l'intera colonna split di due fogli e sotto carico Apps
-// Script ci mette da 3 a 45 secondi. Il risultato pero' cambia solo quando
-// qualcuno scrive, quindi si tiene in cache lato server: il primo che chiede
-// paga il conto, tutti gli altri (iPhone, app Android, widget) rispondono
-// subito. E' la correzione che conta di piu' per l'iPhone, dove iOS cancella
-// periodicamente il salvataggio locale e la cache del browser spesso non c'e'.
-var DEBITO_TTL_S = 1800;
-
-// La cache sta sul SINGOLO FOGLIO, non sulla combinazione persona/conto.
 //
-// Le quattro combinazioni non sono quattro calcoli diversi: "Riccardo Euro" e
-// "Roberta Euro" usano gli stessi due totali, solo scambiati fra loro. Con la
-// cache sulla combinazione ognuna delle quattro restava fredda per conto suo, e
-// la prima apertura di ciascuna costava fino a 46 secondi. Con la cache sul
-// foglio, leggerne una ne scalda due, e l'aggiornamento periodico del widget,
-// che legge entrambe le valute, tiene caldi tutti e quattro i fogli per tutti i
-// dispositivi, iPhone compreso.
-function _totaleCondiviseCache(gid) {
-  var chiave = 'tot_' + gid;
-  var cache = CacheService.getScriptCache();
-  try {
-    var pronto = cache.get(chiave);
-    if (pronto) return JSON.parse(pronto);
-  } catch (e) {
-    // cache illeggibile: si ricalcola
-  }
-
-  var res = _totaleCondivise(gid);
-  try {
-    cache.put(chiave, JSON.stringify(res), DEBITO_TTL_S);
-  } catch (e) {
-    // non riuscire a salvare non deve far fallire la lettura
-  }
-  return res;
-}
-
+// NIENTE CACHE. Legge sempre il foglio.
+//
+// Dalla v23 alla v26 il totale stava in CacheService per 30 minuti, perche' il
+// calcolo costava decine di secondi. Ha prodotto il difetto peggiore possibile:
+// numeri diversi sullo stesso dato. Il server serviva una fotografia vecchia,
+// ogni dispositivo ci sovrapponeva la propria copia locale, e i tre finivano per
+// mostrare tre cifre diverse (misurato: iPhone 359,23 contro 360,23, Samsung
+// 362,23 contro 360,23, e in franchi 0,40 contro zero righe davvero spuntate).
+// Un debito condiviso che non combacia fra chi lo guarda non serve a niente:
+// meglio aspettare un secondo in piu' e vedere il numero del foglio.
+//
+// Regola che ne discende: **non rimettere una cache qui.** Se il calcolo torna
+// lento, la risposta e' leggere meno colonne o meno righe, non conservare il
+// risultato. Vedi _totaleCondivise, che legge solo il tratto importo-spunta.
 function getDebito(gid, gidPartner) {
-  var mio = _totaleCondiviseCache(gid);
+  var mio = _totaleCondivise(gid);
   var partner = (gidPartner != null && !isNaN(gidPartner))
-    ? _totaleCondiviseCache(gidPartner)
+    ? _totaleCondivise(gidPartner)
     : { totale: 0, meta: 0, conteggio: 0 };
   return { mio: mio, partner: partner, netto: mio.meta - partner.meta };
-}
-
-// Da chiamare dopo OGNI scrittura che tocca la colonna split o gli importi:
-// senza questo la cache terrebbe in vita il valore vecchio fino a scadenza e
-// una spesa appena inserita non comparirebbe. Basta invalidare il foglio
-// toccato: le combinazioni si ricompongono da li'.
-function _scadeCacheDebito(gid) {
-  try {
-    CacheService.getScriptCache().remove('tot_' + gid);
-  } catch (e) {
-    // se non si riesce a invalidare, il dato si aggiorna comunque entro il TTL
-  }
-}
-
-// ---------- La cache deve accorgersi anche delle modifiche a mano ----------
-// Invalidare solo dalle scritture dell'app copriva meta' dei casi. Togliendo le
-// spunte direttamente sul foglio il server continuava a rispondere col totale
-// vecchio fino alla scadenza: successo davvero, il foglio diceva zero righe
-// condivise in franchi e l'app mostrava ancora CHF 0,40.
-//
-// Questo trigger si limita a buttare via la voce di cache del foglio toccato.
-// Non legge, non scrive, non calcola: gira a ogni singola modifica del foglio,
-// quindi deve restare di due righe.
-function suModifica(e) {
-  try {
-    var gid = e.range.getSheet().getSheetId();
-    if (SORT_FROM[gid]) _scadeCacheDebito(gid);
-  } catch (err) {
-    // un trigger che fallisce non deve disturbare chi sta scrivendo sul foglio
-  }
-}
-
-// Da lanciare UNA volta dall'editor Apps Script (Esegui > installaTriggerModifica).
-// Chiede l'autorizzazione la prima volta. E' un trigger installabile: quello
-// semplice non basterebbe, perche' onEdit() automatico non ha i permessi per
-// usare CacheService.
-function installaTriggerModifica() {
-  var vecchi = ScriptApp.getProjectTriggers();
-  for (var i = 0; i < vecchi.length; i++) {
-    if (vecchi[i].getHandlerFunction() === 'suModifica') ScriptApp.deleteTrigger(vecchi[i]);
-  }
-  ScriptApp.newTrigger('suModifica')
-    .forSpreadsheet(SPREADSHEET_ID)
-    .onEdit()
-    .create();
-  return 'Trigger installato: le modifiche a mano ora azzerano la cache del debito.';
 }
 
 // ---------- Riepilogo (sola lettura) ----------
@@ -1161,7 +1117,6 @@ function saldaFoglio(gid) {
   // cronologia di Google Sheets. E' successo davvero, su 29 righe. Ora l'elenco
   // delle righe spuntate viene salvato, cosi' un annullamento le rimette tutte.
   _ricordaSalda(gid, spuntate);
-  _scadeCacheDebito(gid);
 
   return { azzerate: n, annullabile: spuntate.length > 0 };
 }
@@ -1209,7 +1164,6 @@ function annullaSalda(gid) {
   // Si consuma: annullare due volte di fila non ha senso e rimetterebbe spunte
   // su righe che nel frattempo potrebbero essere state cambiate a mano.
   PropertiesService.getScriptProperties().deleteProperty(_CHIAVE_SALDA + gid);
-  _scadeCacheDebito(gid);
 
   return { ok: true, version: VERSION, rimesse: rimesse, quando: dati.quando };
 }
@@ -1299,7 +1253,6 @@ function svuotaRiga(gid, riga, atteso) {
   // Il buco non si riordina piu' qui: resta dov'e' e sparisce da solo al primo
   // inserimento, che ricompatta la coda. Riordinare adesso costava un
   // ricalcolo completo del foglio per una cancellazione.
-  _scadeCacheDebito(gid);
 
   return {
     ok: true, version: VERSION, riga: riga, tab: sheet.getName(),
