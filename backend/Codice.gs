@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v25';
+var VERSION = 'v26';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -769,6 +769,40 @@ function _scadeCacheDebito(gid) {
   } catch (e) {
     // se non si riesce a invalidare, il dato si aggiorna comunque entro il TTL
   }
+}
+
+// ---------- La cache deve accorgersi anche delle modifiche a mano ----------
+// Invalidare solo dalle scritture dell'app copriva meta' dei casi. Togliendo le
+// spunte direttamente sul foglio il server continuava a rispondere col totale
+// vecchio fino alla scadenza: successo davvero, il foglio diceva zero righe
+// condivise in franchi e l'app mostrava ancora CHF 0,40.
+//
+// Questo trigger si limita a buttare via la voce di cache del foglio toccato.
+// Non legge, non scrive, non calcola: gira a ogni singola modifica del foglio,
+// quindi deve restare di due righe.
+function suModifica(e) {
+  try {
+    var gid = e.range.getSheet().getSheetId();
+    if (SORT_FROM[gid]) _scadeCacheDebito(gid);
+  } catch (err) {
+    // un trigger che fallisce non deve disturbare chi sta scrivendo sul foglio
+  }
+}
+
+// Da lanciare UNA volta dall'editor Apps Script (Esegui > installaTriggerModifica).
+// Chiede l'autorizzazione la prima volta. E' un trigger installabile: quello
+// semplice non basterebbe, perche' onEdit() automatico non ha i permessi per
+// usare CacheService.
+function installaTriggerModifica() {
+  var vecchi = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < vecchi.length; i++) {
+    if (vecchi[i].getHandlerFunction() === 'suModifica') ScriptApp.deleteTrigger(vecchi[i]);
+  }
+  ScriptApp.newTrigger('suModifica')
+    .forSpreadsheet(SPREADSHEET_ID)
+    .onEdit()
+    .create();
+  return 'Trigger installato: le modifiche a mano ora azzerano la cache del debito.';
 }
 
 // ---------- Riepilogo (sola lettura) ----------
