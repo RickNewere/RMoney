@@ -553,6 +553,7 @@
           var d = j && j.debito;
           if (d && d.mio) salvaDebito(mioGid, d);
           mostraDebito(d, false);
+          precaricaAltriDebiti();
         })
         .catch(function () {
           if (myReq !== debitoReq) return;
@@ -567,6 +568,48 @@
 
     // Il saldo va tenuto per foglio: sono quattro combinazioni persona/conto e
     // mostrare quello sbagliato sarebbe peggio che non mostrarne nessuno.
+    // Le combinazioni persona/conto sono quattro e ognuna ha un debito suo,
+    // quindi una cache sua. Chi usa sempre lo stesso foglio non ne ha mai
+    // scaldata nessun'altra, e al primo cambio si ritrova ad aspettare il
+    // backend: misurato, dai 8 ai 46 secondi, con tre risposte su otto che sono
+    // pagine di errore invece dei dati.
+    //
+    // Dopo la prima lettura riuscita si scaldano in sottofondo anche le altre
+    // tre, una alla volta e distanziate: Apps Script serializza le richieste di
+    // uno stesso utente, quindi lanciarle insieme le farebbe scadere a vicenda.
+    // Da li' in poi cambiare persona o conto e' immediato.
+    var precaricaFatto = false;
+
+    function precaricaAltriDebiti() {
+      if (precaricaFatto) return;
+      precaricaFatto = true;
+
+      var mancanti = [];
+      PERSONE_UI.forEach(function (p) {
+        CONTI_UI.forEach(function (c) {
+          var g = TABS[p][c];
+          var gp = TABS[p === 'Riccardo' ? 'Roberta' : 'Riccardo'][c];
+          if (!leggiDebitoSalvato(g)) mancanti.push({ g: g, gp: gp });
+        });
+      });
+
+      (function prossimo(i) {
+        if (i >= mancanti.length) return;
+        var c = mancanti[i];
+        apiGet(API + '?action=debito&gid=' + c.g + '&gidPartner=' + c.gp)
+          .then(function (j) {
+            if (j && j.debito && j.debito.mio) salvaDebito(c.g, j.debito);
+          })
+          .catch(function () { /* si riprovera' alla prossima apertura */ })
+          .then(function () {
+            setTimeout(function () { prossimo(i + 1); }, 4000);
+          });
+      })(0);
+    }
+
+    var PERSONE_UI = ['Riccardo', 'Roberta'];
+    var CONTI_UI = ['Euro', 'Franchi'];
+
     function chiaveDebito(g) { return 'rmoney_debito_' + g; }
 
     function leggiDebitoSalvato(g) {
