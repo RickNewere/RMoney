@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v28';
+var VERSION = 'v29';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -92,6 +92,21 @@ function doGet(e) {
   // tab, e cambiare persona o conto non costa piu' niente: il dato e' gia' li'.
   if (action === 'debiti') {
     return _json({ ok: true, version: VERSION, fogli: getTuttiIDebiti() });
+  }
+  // "La spesa che ho appena mandato c'e' o no?"
+  //
+  // Serve quando la risposta a una scrittura si perde per strada: la riga quasi
+  // sempre e' stata scritta, e senza un modo rapido di accertarsene o si mostra
+  // un errore su una spesa andata a buon fine, o si rischia il doppione.
+  // Prima il client lo chiedeva a ?action=spese, che ricalcola un mese intero
+  // su due fogli: l'endpoint piu' pesante che c'e', proprio nel momento in cui
+  // la coda e' gia' intasata. Questo legge poche righe in fondo a un foglio.
+  if (action === 'cerca') {
+    var gidT = parseInt(e.parameter.gid, 10);
+    return _json({
+      ok: true, version: VERSION,
+      trovata: cercaSpesa(gidT, parseFloat(e.parameter.importo), e.parameter.nota || '')
+    });
   }
   // Elenco riga per riga delle spese condivise, per verificare il debito a mano.
   if (action === 'condivise') {
@@ -786,6 +801,46 @@ function getDebito(gid, gidPartner) {
     ? _totaleCondivise(gidPartner)
     : { totale: 0, meta: 0, conteggio: 0 };
   return { mio: mio, partner: partner, netto: mio.meta - partner.meta };
+}
+
+// SOLA LETTURA. Cerca una spesa appena scritta guardando solo la CODA del
+// foglio, dove finiscono per forza le righe nuove, e solo le colonne importo e
+// nota. Sono poche decine di celle: risponde in una frazione del tempo di
+// ?action=spese, che per la stessa domanda ricalcolava un mese su due fogli.
+// L'importo si confronta con mezzo centesimo di tolleranza, la nota a meno di
+// spazi ai bordi.
+function cercaSpesa(gid, importo, nota) {
+  if (isNaN(importo)) return false;
+  var sheet = _getSheetByGid(gid);
+  var h = _findHeader(sheet);
+  var idxData  = _colFor(h.headers, ['data']);
+  var idxSpesa = _colFor(h.headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
+  var idxNota  = _colFor(h.headers, ['dettagl', 'nota', 'note', 'descriz']);
+  if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
+  if (idxSpesa < 0 || idxNota < 0) return false;
+
+  var last = sheet.getLastRow();
+  var primaDati = h.row + 1;
+  // Le ultime 60 righe bastano: una spesa nuova viene infilata in ordine di
+  // data, quindi sta in fondo, e comunque mai sopra la soglia SORT_FROM.
+  var da = Math.max(primaDati, SORT_FROM[gid] || primaDati, last - 59);
+  if (last < da) return false;
+
+  var primaC = Math.min(idxSpesa, idxNota);
+  var ultimaC = Math.max(idxSpesa, idxNota);
+  var vals = sheet.getRange(da, primaC + 1, last - da + 1, ultimaC - primaC + 1).getValues();
+  var cSpesa = idxSpesa - primaC, cNota = idxNota - primaC;
+  var cercata = String(nota).trim();
+
+  for (var i = 0; i < vals.length; i++) {
+    var v = vals[i][cSpesa];
+    var n = (typeof v === 'number') ? v : parseFloat(String(v).replace(',', '.'));
+    if (isNaN(n)) continue;
+    if (Math.abs(Math.abs(n) - Math.abs(importo)) > 0.005) continue;
+    if (String(vals[i][cNota]).trim() !== cercata) continue;
+    return true;
+  }
+  return false;
 }
 
 // Totale condiviso dei quattro fogli LOG, indicizzato per gid. Il netto lo
