@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v27';
+var VERSION = 'v28';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -79,6 +79,19 @@ function doGet(e) {
     var gidD = parseInt(e.parameter.gid, 10);
     var gidP = e.parameter.gidPartner ? parseInt(e.parameter.gidPartner, 10) : null;
     return _json({ ok: true, version: VERSION, debito: getDebito(gidD, gidP) });
+  }
+  // Tutti e quattro i fogli in una richiesta sola.
+  //
+  // Chiedere una combinazione per volta voleva dire due richieste per il widget
+  // e una a ogni cambio di persona o conto nell'app. Apps Script pero'
+  // serializza le richieste dello stesso utente: quelle in piu' non sono solo
+  // piu' lente, si accodano e si fanno scadere a vicenda. Visto nel log del
+  // telefono: aprendo l'app la lettura dell'euro e' fallita due volte con
+  // "Aborted" mentre partivano anche le richieste della pagina.
+  // Con una richiesta sola il foglio si apre una volta per tutti e quattro i
+  // tab, e cambiare persona o conto non costa piu' niente: il dato e' gia' li'.
+  if (action === 'debiti') {
+    return _json({ ok: true, version: VERSION, fogli: getTuttiIDebiti() });
   }
   // Elenco riga per riga delle spese condivise, per verificare il debito a mano.
   if (action === 'condivise') {
@@ -156,16 +169,30 @@ function _json(obj) {
 }
 
 // ---------- Helpers ----------
+// Il foglio si apre UNA volta per esecuzione. openById e' una chiamata di rete
+// e su un foglio con molte formule puo' costare qualche centinaio di
+// millisecondi: farla a ogni _getSheetByGid significava pagarla quattro volte
+// per rispondere a ?action=debiti. La memoria vale solo dentro la singola
+// esecuzione, quindi non puo' restituire dati vecchi.
+var _ssAperto = null;
+var _fogliPerGid = null;
+
 function _ss() {
-  return SpreadsheetApp.openById(SPREADSHEET_ID);
+  if (!_ssAperto) _ssAperto = SpreadsheetApp.openById(SPREADSHEET_ID);
+  return _ssAperto;
 }
 
 function _getSheetByGid(gid) {
-  var sheets = _ss().getSheets();
-  for (var i = 0; i < sheets.length; i++) {
-    if (sheets[i].getSheetId() === gid) return sheets[i];
+  if (!_fogliPerGid) {
+    _fogliPerGid = {};
+    var sheets = _ss().getSheets();
+    for (var i = 0; i < sheets.length; i++) {
+      _fogliPerGid[sheets[i].getSheetId()] = sheets[i];
+    }
   }
-  throw new Error('Tab con gid ' + gid + ' non trovato.');
+  var f = _fogliPerGid[gid];
+  if (!f) throw new Error('Tab con gid ' + gid + ' non trovato.');
+  return f;
 }
 
 // Trova automaticamente la riga delle intestazioni (puo' non essere la 1a
@@ -759,6 +786,16 @@ function getDebito(gid, gidPartner) {
     ? _totaleCondivise(gidPartner)
     : { totale: 0, meta: 0, conteggio: 0 };
   return { mio: mio, partner: partner, netto: mio.meta - partner.meta };
+}
+
+// Totale condiviso dei quattro fogli LOG, indicizzato per gid. Il netto lo
+// compone il client: sono due sottrazioni, non vale una richiesta a testa.
+function getTuttiIDebiti() {
+  var out = {};
+  Object.keys(SORT_FROM).forEach(function (k) {
+    out[k] = _totaleCondivise(parseInt(k, 10));
+  });
+  return out;
 }
 
 // ---------- Riepilogo (sola lettura) ----------

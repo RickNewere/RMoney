@@ -93,13 +93,13 @@ export async function risolviApi() {
   return API_URL;
 }
 
-async function leggiCoppia(api, c) {
-  const j = await chiedi(
-    api + '?action=debito&gid=' + c.gid + '&gidPartner=' + c.gidPartner
-  );
-  if (!j || !j.ok || !j.debito) throw new Error('Risposta inattesa dal backend.');
+// Compone una valuta partendo dai totali dei quattro fogli.
+function componiVoce(fogli, c) {
+  const mio = fogli[String(c.gid)];
+  const suo = fogli[String(c.gidPartner)];
+  if (!mio || !suo) throw new Error('Totali mancanti per ' + c.valuta + '.');
 
-  const netto = Number(j.debito.netto) || 0;
+  const netto = (Number(mio.meta) || 0) - (Number(suo.meta) || 0);
   // Chi deve dare i soldi all'altro. Sotto il centesimo si considera pari.
   const pari = Math.abs(netto) < 0.005;
   const debitore = pari ? null : (netto > 0 ? PARTNER : PERSONA);
@@ -168,29 +168,22 @@ async function leggiDebitoOra() {
     const api = await risolviApi();
     console.log('[RMoney] leggo: api risolta');
 
-    // UNA ALLA VOLTA, non in parallelo. Apps Script serializza le richieste
-    // dello stesso utente: mandandole insieme la seconda resta in coda mentre
-    // il suo timeout scorre, e veniva abortita a ogni tentativo. Misurato: euro
-    // ~3 s, franchi ~10 s da sole, 16 s se lanciate insieme.
-    const vecchie = await leggiCache();
+    // UNA RICHIESTA SOLA per tutte e due le valute (?action=debiti).
+    //
+    // Prima era una per valuta, in sequenza. Sequenza e non parallelo era gia'
+    // corretto (Apps Script serializza le richieste dello stesso utente, e
+    // lanciarle insieme le fa scadere a vicenda), ma restavano due giri, e
+    // all'avvio dell'app si sommavano a quelli della pagina: nel log del
+    // telefono la lettura dell'euro e' fallita due volte con "Aborted" mentre
+    // quella dei franchi passava. Con una richiesta sola il problema non si
+    // pone, e il backend apre il foglio una volta invece di due.
+    const j = await chiedi(api + '?action=debiti');
+    if (!j || !j.ok || !j.fogli) throw new Error('Risposta inattesa dal backend.');
+
     const voci = [];
-    let almenoUna = false;
     for (const c of COPPIE) {
-      try {
-        voci.push(await leggiCoppia(api, c));
-        almenoUna = true;
-      } catch (err) {
-        // Se una valuta non risponde si tiene il suo valore precedente invece
-        // di buttare via anche quella che era arrivata: prima bastava un
-        // fallimento su due per lasciare tutto il widget al palo.
-        console.log('[RMoney] leggo: ' + c.valuta + ' non letto (' + err.message + ')');
-        const vecchia = vecchie && (vecchie.voci || []).filter(function (v) {
-          return v.valuta === c.valuta;
-        })[0];
-        if (vecchia) voci.push(vecchia);
-      }
+      voci.push(componiVoce(j.fogli, c));
     }
-    if (!almenoUna) throw new Error('nessuna valuta letta');
     console.log('[RMoney] leggo: debiti letti (' + voci.length + ')');
     const dati = { v: CACHE_V, voci: voci, aggiornato: Date.now(), vecchio: false };
     // La scrittura in cache non deve poter bloccare il disegno: se il modulo
