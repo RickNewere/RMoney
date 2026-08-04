@@ -377,12 +377,22 @@
     // (verificaSpesaScritta), che e' l'unico modo sicuro di uscire dal dubbio
     // senza rischiare un doppione.
     //
-    // Da quando il backend scrive con una sola operazione (v25) una scrittura
-    // sana si chiude in un paio di secondi. Il tetto era 25 s, tarato sui tempi
-    // vecchi: restare in attesa venti secondi oltre il dovuto non recupera
-    // niente, tiene solo il pulsante bloccato. Sopra i 15 s si va a controllare
-    // il foglio, che e' comunque la strada che porta a una risposta certa.
-    var TETTO_POST_MS = 15000;
+    // Il tetto va tarato sull'ATTESA IN CODA, non sulla durata della scrittura.
+    //
+    // La scrittura da sola si chiude in un paio di secondi (v25 in poi). Con
+    // quel numero in testa era stato messo a 15 s, ed e' stato un errore: Apps
+    // Script serializza le esecuzioni, quindi una scrittura puo' restare ferma
+    // dietro una lettura da 4-6 s, a volte dietro due. A 15 s scadeva e usciva
+    // "risposta non valida" su una spesa che invece era stata scritta.
+    //
+    // Peggio: interrompere la fetch NON ferma l'esecuzione su Apps Script.
+    // La richiesta scaduta continua a occupare la coda, quindi un tetto troppo
+    // corto non libera niente, produce solo un falso allarme.
+    //
+    // 30 s e' scelto per stare sopra la coda peggiore vista (due letture piu'
+    // la scrittura), restando comunque un limite: serve solo a non lasciare il
+    // pulsante bloccato per sempre se la richiesta si pianta davvero.
+    var TETTO_POST_MS = 30000;
 
     function apiPost(corpo) {
       var ctrl = window.AbortController ? new AbortController() : null;
@@ -435,6 +445,7 @@
     });
 
     var catReq = 0; // token: solo l'ultima richiesta puo' scrivere nella select
+    var catLetti = {}; // gid gia' chiesti in questa sessione
 
     function caricaCategorie() {
       var sel = document.getElementById('categoria');
@@ -449,6 +460,13 @@
       if (note.length) riempiCategorie(sel, note);
       else sel.innerHTML = '<option value="">Caricamento…</option>';
 
+      // Un foglio si chiede UNA volta per sessione. Prima partiva una richiesta
+      // a ogni tocco su Persona o Conto, per un elenco che non cambia mai: sono
+      // richieste che si mettono in coda davanti a quella che conta, e Apps
+      // Script serializza, quindi rallentavano l'inserimento di una spesa.
+      if (catLetti[mioGid]) return;
+      catLetti[mioGid] = true;
+
       apiGet(API + '?action=categorie&gid=' + mioGid)
         .then(function (j) {
           // Una risposta senza ok non e' un elenco vuoto: e' un errore, e va
@@ -462,6 +480,9 @@
           else sel.innerHTML = '<option value="">(nessuna categoria)</option>';
         })
         .catch(function () {
+          // Non riuscita: si toglie il segno, cosi' il prossimo passaggio su
+          // questo foglio riprova invece di restare senza elenco per sempre.
+          delete catLetti[mioGid];
           if (mio !== catReq) return;
           // Con un elenco gia' noto non si segnala niente: si puo' inserire lo
           // stesso, e le categorie non cambiano quasi mai.
@@ -815,7 +836,11 @@
           // c'e'. Casi tipici: Apps Script che risponde con una pagina HTML al
           // posto del JSON (su Safari l'errore e' l'incomprensibile "The string
           // did not match the expected pattern"), oppure la rete caduta a meta'.
-          msg.className = ''; msg.textContent = 'Risposta non valida, controllo il foglio…';
+          // Il testo dice cosa sta succedendo, non che qualcosa e' andato
+          // storto: nella maggior parte dei casi la spesa e' sul foglio ed e'
+          // solo la risposta a essersi persa. "Risposta non valida" faceva
+          // pensare a un errore di salvataggio che quasi mai c'era stato.
+          msg.className = ''; msg.textContent = 'Verifico sul foglio…';
           verificaSpesaScritta(dati, function (errore, trovata) {
             if (errore) {
               msg.className = 'err';
@@ -838,41 +863,43 @@
         });
     });
 
-    // Cerca la spesa appena inviata fra quelle del suo mese e categoria.
+    // La spesa appena inviata e' finita sul foglio, si' o no?
+    //
     // Serve a distinguere "non e' passata" da "e' passata ma la risposta si e'
     // persa", che a schermo sono identiche e portano al doppio inserimento.
-    function verificaSpesaScritta(dati, cb) {
-      var p = String(dati.data || '').split('-');
-      if (p.length < 2) { cb(new Error('data non interpretabile')); return; }
-      var url = API + '?action=spese&conto=' + encodeURIComponent(conto)
-        + '&tipo=mensile&anno=' + p[0] + '&mese=' + parseInt(p[1], 10)
-        + '&persona=' + encodeURIComponent(persona)
-        + '&categoria=' + encodeURIComponent(dati.categoria);
-      var atteso = Math.abs(parseFloat(String(dati.spesa).replace(',', '.')));
-      var nota = String(dati.nota || '').trim();
+    // Il secondo caso e' di gran lunga il piu' frequente: la scrittura dentro
+    // Apps Script dura 1-2 secondi ed e' quasi sempre andata a buon fine, e'
+    // il ritiro della risposta da Google che ogni tanto torna come pagina di
+    // errore. Per questo la verifica deve essere rapida e non fallire quasi
+    // mai, altrimenti si finisce per dire "non riesco a verificare" su una
+    // spesa che c'e'.
+    //
+    // Chiede a ?action=cerca, che guarda solo la coda del foglio e due colonne.
+    // Prima usava ?action=spese, che ricalcola un mese intero su due fogli:
+    // l'endpoint piu' pesante, chiesto nel momento peggiore.
+    // Due tentativi, perche' un fallimento qui lascia l'utente nel dubbio.
+    function verificaSpesaScritta(dati, cb, tentativo) {
+      tentativo = tentativo || 0;
+      var url = API + '?action=cerca&gid=' + dati.gid
+        + '&importo=' + encodeURIComponent(String(dati.spesa).replace(',', '.'))
+        + '&nota=' + encodeURIComponent(String(dati.nota || '').trim());
 
-      // UN solo tentativo con tetto corto, non la scala completa di apiGet:
-      // qui l'utente sta gia' aspettando col pulsante bloccato dopo un invio
-      // andato storto, e la scala intera lo terrebbe fermo oltre un minuto.
-      // Se non si riesce a verificare in fretta, meglio dirglielo e lasciargli
-      // decidere che tenerlo in ostaggio.
       var ctrlV = window.AbortController ? new AbortController() : null;
-      var scadutoV = setTimeout(function () { if (ctrlV) ctrlV.abort(); }, 12000);
+      var scadutoV = setTimeout(function () { if (ctrlV) ctrlV.abort(); }, 15000);
       fetch(url, ctrlV ? { signal: ctrlV.signal } : undefined)
         .then(leggiRisposta)
         .then(function (j) {
           clearTimeout(scadutoV);
-          return j;
+          if (!j || !j.ok || typeof j.trovata !== 'boolean') {
+            throw new Error('risposta non valida');
+          }
+          cb(null, j.trovata);
         })
-        .then(function (j) {
-          if (!j || !j.ok || !j.spese) throw new Error('risposta non valida');
-          var righe = j.spese.righe || [];
-          cb(null, righe.some(function (r) {
-            return Math.abs(Math.abs(r.importo) - atteso) < 0.005
-              && String(r.nota || '').trim() === nota;
-          }));
-        })
-        .catch(function (e) { clearTimeout(scadutoV); cb(e); });
+        .catch(function (e) {
+          clearTimeout(scadutoV);
+          if (tentativo >= 1) { cb(e); return; }
+          setTimeout(function () { verificaSpesaScritta(dati, cb, tentativo + 1); }, 2000);
+        });
     }
 
     // ==================== Riepilogo ====================
