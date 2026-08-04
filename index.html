@@ -346,12 +346,28 @@
     var TETTI_MS = [20000, 45000];
     var PAUSE_MS = [2000];
 
+    // OGNI lettura porta un parametro diverso, e non e' una precauzione teorica.
+    //
+    // Apps Script non risponde con i dati: risponde con un redirect verso
+    // script.googleusercontent.com con una chiave usa e getta. Se il browser
+    // ripresenta quel redirect preso dalla cache, la chiave e' gia' stata
+    // consumata e la seconda tappa risponde 404 con una pagina HTML, che qui
+    // diventa "non caricato, riprova" su un backend che sta benissimo.
+    //
+    // Visto in diretta sulla pagina viva: prima ?action=debiti 200 in 4,7 s,
+    // poi la stessa identica URL due volte di fila, 404 e 404. Nel frattempo
+    // ?action=cerca, che aveva una URL diversa, rispondeva in 1,8 s. Da
+    // terminale non si riproduce, perche' quella cache non c'e': e' un difetto
+    // che colpisce solo il browser, cioe' proprio la web app.
     function apiGet(url, tentativo) {
       tentativo = tentativo || 0;
       var ctrl = window.AbortController ? new AbortController() : null;
       var scaduto = setTimeout(function () { if (ctrl) ctrl.abort(); },
         TETTI_MS[tentativo] || 45000);
-      return fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
+      var url1 = url + (url.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now();
+      var opz = { cache: 'no-store' };
+      if (ctrl) opz.signal = ctrl.signal;
+      return fetch(url1, opz)
         .then(leggiRisposta)
         .then(function (j) { clearTimeout(scaduto); return j; })
         .catch(function (e) {
@@ -920,7 +936,11 @@
 
       var ctrlV = window.AbortController ? new AbortController() : null;
       var scadutoV = setTimeout(function () { if (ctrlV) ctrlV.abort(); }, 15000);
-      fetch(url, ctrlV ? { signal: ctrlV.signal } : undefined)
+      // Stessa precauzione di apiGet: URL sempre diversa, altrimenti il secondo
+      // tentativo puo' ripescare dalla cache un redirect gia' consumato.
+      var opzV = { cache: 'no-store' };
+      if (ctrlV) opzV.signal = ctrlV.signal;
+      fetch(url + '&_=' + Date.now(), opzV)
         .then(leggiRisposta)
         .then(function (j) {
           clearTimeout(scadutoV);
