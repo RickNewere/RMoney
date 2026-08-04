@@ -327,24 +327,34 @@
 
     // Le letture si possono ripetere senza conseguenze, quindi ritentano da
     // sole: l'inciampo e' passeggero e sparisce al tentativo dopo.
+    // Tetti CRESCENTI, non un unico tetto lungo.
+    //
+    // Da quando il backend tiene in cache i totali per foglio, una risposta
+    // buona arriva in 1,2-1,6 secondi. Se non arriva entro pochi secondi vuol
+    // dire che Apps Script sta inciampando, e restare in attesa mezzo minuto e'
+    // tempo buttato: conviene mollare presto e riprovare. Con il tetto unico da
+    // 50 s la prima schermata restava sui puntini anche 30 secondi buoni, ed e'
+    // esattamente il "ci mette troppo" che si vedeva.
+    // L'ultimo tentativo resta generoso per il caso in cui il calcolo sia
+    // davvero freddo e stia solo macinando.
+    var TETTI_MS = [7000, 18000, 45000];
+    var PAUSE_MS = [1500, 3000];
+
     function apiGet(url, tentativo) {
       tentativo = tentativo || 0;
-      // Tetto sul singolo tentativo: misurato, sotto carico Apps Script arriva
-      // a rispondere dopo 33 secondi, e senza limite la pagina resta appesa.
       var ctrl = window.AbortController ? new AbortController() : null;
-      // 50 s: misurata una risposta corretta arrivata dopo 45. Con 30 la si
-      // buttava via proprio quando stava per arrivare. Non e' un problema di
-      // attesa percepita, perche' i dati noti sono gia' a schermo.
-      var scaduto = setTimeout(function () { if (ctrl) ctrl.abort(); }, 50000);
+      var scaduto = setTimeout(function () { if (ctrl) ctrl.abort(); },
+        TETTI_MS[tentativo] || 45000);
       return fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
         .then(leggiRisposta)
         .then(function (j) { clearTimeout(scaduto); return j; })
         .catch(function (e) {
           clearTimeout(scaduto);
-          if (tentativo >= 2) throw e;
-          // Pausa lunga: quando risponde con una pagina invece dei dati e'
-          // perche' e' congestionato, e ributtarsi subito peggiora la coda.
-          return new Promise(function (ok) { setTimeout(ok, 2500 * (tentativo + 1)); })
+          if (tentativo >= TETTI_MS.length - 1) throw e;
+          // Una pausa ci vuole comunque: quando risponde con una pagina invece
+          // dei dati e' perche' e' congestionato, e ributtarsi subito peggiora
+          // la coda. Ma breve, altrimenti si somma all'attesa gia' spesa.
+          return new Promise(function (ok) { setTimeout(ok, PAUSE_MS[tentativo] || 3000); })
             .then(function () { return apiGet(url, tentativo + 1); });
         });
     }
