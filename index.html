@@ -363,12 +363,28 @@
     // arrivata comunque, e un secondo invio scriverebbe la spesa due volte:
     // e' esattamente cosi' che e' nato un doppione sul foglio. Chi chiama deve
     // verificare sul foglio, non reinviare.
+    //
+    // Ma un tetto di attesa ci vuole lo stesso. Senza, una richiesta che si
+    // pianta lascia la promessa mai risolta e il pulsante resta su
+    // "Salvataggio…" per sempre: e' successo davvero. Allo scadere si fallisce,
+    // e chi chiama va a controllare sul foglio se la scrittura era passata
+    // (verificaSpesaScritta), che e' l'unico modo sicuro di uscire dal dubbio
+    // senza rischiare un doppione.
+    var TETTO_POST_MS = 25000;
+
     function apiPost(corpo) {
-      return fetch(API, {
+      var ctrl = window.AbortController ? new AbortController() : null;
+      var scaduto = setTimeout(function () { if (ctrl) ctrl.abort(); }, TETTO_POST_MS);
+      var opzioni = {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify(corpo)
-      }).then(leggiRisposta);
+      };
+      if (ctrl) opzioni.signal = ctrl.signal;
+      return fetch(API, opzioni)
+        .then(leggiRisposta)
+        .then(function (j) { clearTimeout(scaduto); return j; })
+        .catch(function (e) { clearTimeout(scaduto); throw e; });
     }
 
     function initSeg(id, onPick) {
@@ -803,7 +819,19 @@
       var atteso = Math.abs(parseFloat(String(dati.spesa).replace(',', '.')));
       var nota = String(dati.nota || '').trim();
 
-      apiGet(url)
+      // UN solo tentativo con tetto corto, non la scala completa di apiGet:
+      // qui l'utente sta gia' aspettando col pulsante bloccato dopo un invio
+      // andato storto, e la scala intera lo terrebbe fermo oltre un minuto.
+      // Se non si riesce a verificare in fretta, meglio dirglielo e lasciargli
+      // decidere che tenerlo in ostaggio.
+      var ctrlV = window.AbortController ? new AbortController() : null;
+      var scadutoV = setTimeout(function () { if (ctrlV) ctrlV.abort(); }, 12000);
+      fetch(url, ctrlV ? { signal: ctrlV.signal } : undefined)
+        .then(leggiRisposta)
+        .then(function (j) {
+          clearTimeout(scadutoV);
+          return j;
+        })
         .then(function (j) {
           if (!j || !j.ok || !j.spese) throw new Error('risposta non valida');
           var righe = j.spese.righe || [];
@@ -812,7 +840,7 @@
               && String(r.nota || '').trim() === nota;
           }));
         })
-        .catch(function (e) { cb(e); });
+        .catch(function (e) { clearTimeout(scadutoV); cb(e); });
     }
 
     // ==================== Riepilogo ====================
