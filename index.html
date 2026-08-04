@@ -537,19 +537,21 @@
       saldaBtn.disabled = true;
       document.getElementById('saldaMsg').textContent = '';
 
-      // Ultimo valore letto, mostrato subito. Il backend sotto carico impiega
-      // anche 45 secondi o risponde con una pagina di errore, e lasciare due
-      // trattini (o "(errore)") per tutto quel tempo fa sembrare l'app rotta
-      // quando invece il dato lo conosciamo gia'.
-      var vecchio = leggiDebitoSalvato(mioGid);
-      if (vecchio) {
-        mostraDebito(vecchio, true);
-      } else {
-        foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
-        netVal.textContent = '…'; netVal.className = 'debtVal';
-      }
+      // Si aspetta il dato del foglio. NON si mostra piu' l'ultimo valore
+      // salvato in locale.
+      //
+      // Quella scorciatoia esisteva perche' il backend impiegava anche 45
+      // secondi, e serviva a non lasciare l'app con due trattini per tutto quel
+      // tempo. Il prezzo pero' era che ogni dispositivo mostrava la propria
+      // copia, presa quando aveva guardato l'ultima volta: iPhone, Samsung e
+      // Pixel finivano per dire tre cifre diverse dello stesso debito (viste
+      // 360,23 contro 359,23 in euro e 362,23 contro 360,23). Un debito
+      // condiviso che non combacia fra chi lo guarda e' peggio di un debito che
+      // ci mette un secondo a comparire.
+      foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
+      netVal.textContent = '…'; netVal.className = 'debtVal';
 
-      function mostraDebito(d, daCache) {
+      function mostraDebito(d) {
         if (!d || !d.mio) { foglioVal.textContent = '—'; netVal.textContent = '—'; return; }
 
           // Meta condivisa di questo foglio (quanto l'altra persona deve).
@@ -565,14 +567,13 @@
         var netto = d.netto || 0;
         var abs = Math.abs(netto);
         if (abs < 0.005) {
-          netLbl.textContent = 'Saldo netto ' + cReq + (daCache ? ' · ultimo noto' : '');
+          netLbl.textContent = 'Saldo netto ' + cReq;
           netVal.textContent = 'in pari';
           netVal.className = 'debtVal zero';
         } else {
           var chi = netto > 0 ? altraReq : pReq;
           var aChi = netto > 0 ? pReq : altraReq;
-          netLbl.textContent = chi + ' deve a ' + aChi + ' (' + cReq + ')'
-            + (daCache ? ' · ultimo noto' : '');
+          netLbl.textContent = chi + ' deve a ' + aChi + ' (' + cReq + ')';
           netVal.textContent = fmtReq(abs);
           netVal.className = 'debtVal';
         }
@@ -582,80 +583,47 @@
         .then(function (j) {
           if (myReq !== debitoReq) return; // risposta superata da una piu' recente
           saldaBtn.disabled = false;
-          var d = j && j.debito;
-          if (d && d.mio) salvaDebito(mioGid, d);
-          mostraDebito(d, false);
-          precaricaAltriDebiti();
+          mostraDebito(j && j.debito);
         })
         .catch(function () {
           if (myReq !== debitoReq) return;
-          // Con un valore gia' a schermo non si scrive "(errore)": cancellare
-          // un numero corretto per sostituirlo con una parola e' un
-          // peggioramento. Si lascia il dato, marcato come ultimo noto.
-          if (vecchio) { saldaBtn.disabled = false; return; }
-          foglioVal.textContent = '(errore)'; foglioVal.className = 'debtVal zero';
+          // Meglio dire che non si sa, che mostrare un numero di ieri: su questo
+          // numero si decide chi paga, e uno sbagliato e' peggio di nessuno.
+          // Il pulsante "Saldato" resta bloccato: non si azzerano le spunte
+          // senza aver visto il totale vero.
+          foglioVal.textContent = 'non caricato, riprova';
+          foglioVal.className = 'debtVal zero';
           netVal.textContent = '';
+          netLbl.textContent = 'Saldo netto ' + cReq;
         });
     }
 
-    // Il saldo va tenuto per foglio: sono quattro combinazioni persona/conto e
-    // mostrare quello sbagliato sarebbe peggio che non mostrarne nessuno.
-    // Le combinazioni persona/conto sono quattro e ognuna ha un debito suo,
-    // quindi una cache sua. Chi usa sempre lo stesso foglio non ne ha mai
-    // scaldata nessun'altra, e al primo cambio si ritrova ad aspettare il
-    // backend: misurato, dai 8 ai 46 secondi, con tre risposte su otto che sono
-    // pagine di errore invece dei dati.
+    // Qui c'era una cache del debito in localStorage, una per ognuna delle
+    // quattro combinazioni persona/conto, piu' un precaricamento in sottofondo
+    // delle altre tre dopo la prima lettura riuscita.
     //
-    // Dopo la prima lettura riuscita si scaldano in sottofondo anche le altre
-    // tre, una alla volta e distanziate: Apps Script serializza le richieste di
-    // uno stesso utente, quindi lanciarle insieme le farebbe scadere a vicenda.
-    // Da li' in poi cambiare persona o conto e' immediato.
-    var precaricaFatto = false;
-
-    function precaricaAltriDebiti() {
-      if (precaricaFatto) return;
-      precaricaFatto = true;
-
-      var mancanti = [];
-      PERSONE_UI.forEach(function (p) {
-        CONTI_UI.forEach(function (c) {
-          var g = TABS[p][c];
-          var gp = TABS[p === 'Riccardo' ? 'Roberta' : 'Riccardo'][c];
-          if (!leggiDebitoSalvato(g)) mancanti.push({ g: g, gp: gp });
-        });
-      });
-
-      (function prossimo(i) {
-        if (i >= mancanti.length) return;
-        var c = mancanti[i];
-        apiGet(API + '?action=debito&gid=' + c.g + '&gidPartner=' + c.gp)
-          .then(function (j) {
-            if (j && j.debito && j.debito.mio) salvaDebito(c.g, j.debito);
-          })
-          .catch(function () { /* si riprovera' alla prossima apertura */ })
-          .then(function () {
-            setTimeout(function () { prossimo(i + 1); }, 4000);
-          });
-      })(0);
-    }
-
-    var PERSONE_UI = ['Riccardo', 'Roberta'];
-    var CONTI_UI = ['Euro', 'Franchi'];
-
-    function chiaveDebito(g) { return 'rmoney_debito_' + g; }
-
-    function leggiDebitoSalvato(g) {
+    // Tolta apposta, e non va rimessa. Serviva a coprire un backend che
+    // impiegava decine di secondi, ma una volta scritta una combinazione non
+    // veniva piu' aggiornata finche' non la si guardava, quindi ogni
+    // dispositivo conservava la fotografia del momento in cui l'aveva aperta e
+    // i tre mostravano tre numeri diversi. Il precaricamento per giunta
+    // sparava tre richieste in piu' a ogni prima apertura, e Apps Script
+    // serializza le richieste dello stesso utente: contribuiva alla lentezza
+    // che la cache doveva mascherare.
+    //
+    // Il totale ora arriva dal foglio a ogni lettura (backend v27, che legge
+    // solo le colonne importo e spunta). Se serve renderlo piu' veloce, si
+    // legge di meno, non si conserva di piu'.
+    // Ripulisce le chiavi lasciate dalle versioni precedenti: senza, restano
+    // in localStorage per sempre senza che nessuno le legga.
+    (function scartaVecchiaCacheDebito() {
       try {
-        var s = localStorage.getItem(chiaveDebito(g));
-        var v = s ? JSON.parse(s) : null;
-        return (v && v.mio) ? v : null;
-      } catch (e) { return null; }
-    }
-
-    function salvaDebito(g, d) {
-      try { localStorage.setItem(chiaveDebito(g), JSON.stringify(d)); }
-      catch (e) { /* spazio pieno o modalita' privata: pazienza */ }
-    }
+        for (var i = localStorage.length - 1; i >= 0; i--) {
+          var k = localStorage.key(i);
+          if (k && k.indexOf('rmoney_debito_') === 0) localStorage.removeItem(k);
+        }
+      } catch (e) { /* modalita' privata: pazienza */ }
+    })();
 
     caricaDebito();
 
