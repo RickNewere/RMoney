@@ -93,6 +93,19 @@ export async function risolviApi() {
   return API_URL;
 }
 
+// Ripiego per i backend precedenti alla v28: due letture, una per valuta,
+// in sequenza. Mai in parallelo, Apps Script le farebbe scadere a vicenda.
+async function leggiPerValuta(api) {
+  const fogli = {};
+  for (const c of COPPIE) {
+    const j = await chiedi(api + '?action=debito&gid=' + c.gid + '&gidPartner=' + c.gidPartner);
+    if (!j || !j.debito || !j.debito.mio) throw new Error('Risposta inattesa dal backend.');
+    fogli[String(c.gid)] = j.debito.mio;
+    fogli[String(c.gidPartner)] = j.debito.partner;
+  }
+  return fogli;
+}
+
 // Compone una valuta partendo dai totali dei quattro fogli.
 function componiVoce(fogli, c) {
   const mio = fogli[String(c.gid)];
@@ -178,11 +191,16 @@ async function leggiDebitoOra() {
     // quella dei franchi passava. Con una richiesta sola il problema non si
     // pone, e il backend apre il foglio una volta invece di due.
     const j = await chiedi(api + '?action=debiti');
-    if (!j || !j.ok || !j.fogli) throw new Error('Risposta inattesa dal backend.');
+    if (!j || !j.ok) throw new Error('Risposta inattesa dal backend.');
+
+    // Un backend precedente alla v28 non conosce ?action=debiti e risponde con
+    // il suo JSON informativo, senza "fogli". L'APK e il backend non si
+    // aggiornano insieme, quindi ci si ripiega sulle letture per valuta.
+    const fogli = j.fogli || await leggiPerValuta(api);
 
     const voci = [];
     for (const c of COPPIE) {
-      voci.push(componiVoce(j.fogli, c));
+      voci.push(componiVoce(fogli, c));
     }
     console.log('[RMoney] leggo: debiti letti (' + voci.length + ')');
     const dati = { v: CACHE_V, voci: voci, aggiornato: Date.now(), vecchio: false };
