@@ -68,6 +68,10 @@
     .debtLbl { font-size:14px; color:var(--text); }
     .debtVal { font-size:17px; font-weight:800; color:var(--accent); white-space:nowrap; }
     .debtVal.zero { color:var(--muted); font-weight:600; font-size:14px; }
+    /* Marker next to the title: says whether the figure on screen is being
+       refreshed or is stale, without ever blanking the figure itself. */
+    .debtStato { font-size:11px; font-weight:600; color:var(--muted); margin-left:8px; }
+    .debtStato.vecchio { color:var(--err, #c0392b); cursor:pointer; }
     .saldaBtn { width:100%; margin-top:14px; padding:11px; border-radius:12px; border:1px solid var(--border); background:transparent; color:var(--muted); font-size:14px; font-weight:700; }
     .saldaBtn:disabled { opacity:.5; }
     .saldaMsg { text-align:center; margin-top:8px; font-size:13px; font-weight:600; min-height:16px; }
@@ -146,7 +150,7 @@
 
   <div id="viewInserisci">
   <div class="card debt" id="debt">
-    <div class="debtTitle">Debito condiviso</div>
+    <div class="debtTitle">Debito condiviso<span class="debtStato" id="debtStato"></span></div>
     <div class="debtRow">
       <span class="debtLbl" id="debtFoglioLbl">Dal foglio</span>
       <span class="debtVal" id="debtFoglioVal">…</span>
@@ -637,6 +641,47 @@
     // pagina caricava le sue.
     var fogliDebito = null;  // ultimo giro di letture, solo in memoria
 
+    // La card del debito e' STACCATA dalla scrittura: non la fa aspettare e non
+    // ne viene azzerata. Prima erano legate, e si vedeva.
+    //
+    // Salvando una spesa condivisa la card tornava sui puntini e ci restava
+    // 8,5 secondi misurati (4,5 di attesa voluta + 4 di lettura), perche' i
+    // totali arrivavano attaccati alla conferma della scrittura. Se quella
+    // lettura andava male, il numero spariva del tutto e restava "non caricato".
+    // Da qui il "non si vede piu' il debito": non era rotto, era in attesa.
+    //
+    // Adesso i due percorsi non si toccano:
+    //   - la conferma della scrittura chiede solo ?action=cerca, subito, senza
+    //     i quattro totali e senza i 4,5 secondi di attesa che servivano a loro;
+    //   - il debito si aggiorna per conto suo, e nel frattempo il numero resta
+    //     a schermo con la scritta "aggiorno…" di fianco al titolo.
+    //
+    // Il numero mostrato durante l'aggiornamento non e' vecchio: appena la
+    // scrittura e' confermata si somma la meta' della spesa appena inserita
+    // (aggiornaDebitoLocale), che e' la stessa aritmetica che fa il foglio. La
+    // lettura che arriva dopo lo conferma, e se mai fosse diversa vince lei.
+    var debitoInCorso = false;      // c'e' una lettura in volo
+    var debitoNonAggiornato = false; // l'ultima lettura e' fallita, il numero resta
+    var CHIAVI_META = ['totale', 'meta', 'conteggio'];
+
+    // Somma al totale in memoria una spesa condivisa appena scritta sul foglio.
+    // Non e' una stima: e' l'importo che abbiamo appena mandato noi, sul foglio
+    // che abbiamo scelto noi, e il foglio ne fara' la meta' esattamente come qui.
+    function aggiornaDebitoLocale(gidScritto, importo) {
+      if (!fogliDebito || fogliDebito === 'errore') return;
+      var v = Math.abs(parseFloat(String(importo).replace(',', '.')));
+      if (!isFinite(v) || v === 0) return;
+      var f = fogliDebito[gidScritto];
+      if (!f) { f = fogliDebito[gidScritto] = { totale: 0, meta: 0, conteggio: 0 }; }
+      for (var i = 0; i < CHIAVI_META.length; i++) {
+        if (typeof f[CHIAVI_META[i]] !== 'number') f[CHIAVI_META[i]] = 0;
+      }
+      f.totale += v;
+      f.meta += v / 2;
+      f.conteggio += 1;
+      mostraDebito();
+    }
+
     // Rende la card con quello che c'e', senza toccare la rete.
     function mostraDebito() {
       var foglioLbl = document.getElementById('debtFoglioLbl');
@@ -644,6 +689,7 @@
       var netLbl = document.getElementById('debtNetLbl');
       var netVal = document.getElementById('debtNetVal');
       var saldaBtn = document.getElementById('saldaBtn');
+      var stato = document.getElementById('debtStato');
 
       var altra = persona === 'Riccardo' ? 'Roberta' : 'Riccardo';
       var simb = conto === 'Euro' ? '€' : 'CHF';
@@ -655,16 +701,20 @@
       // quando la lettura finisce, e cancellerebbe l'esito appena scritto
       // ("Azzerate N spunte") un attimo dopo averlo mostrato.
 
-      // Finche' non sono arrivati i numeri non si salda: azzerare le spunte
-      // senza aver visto il totale vero sarebbe irreversibile alla cieca.
+      // I puntini e "non caricato" valgono solo quando non c'e' nessun numero da
+      // mostrare, cioe' alla prima apertura. Se un numero c'e' gia' non si
+      // cancella per rileggerlo: si lascia a schermo e si dice di fianco al
+      // titolo che sta arrivando quello nuovo.
       if (!fogliDebito) {
         saldaBtn.disabled = true;
+        stato.textContent = ''; stato.className = 'debtStato';
         foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
         netVal.textContent = '…'; netVal.className = 'debtVal';
         return;
       }
       if (fogliDebito === 'errore') {
         saldaBtn.disabled = true;
+        stato.textContent = ''; stato.className = 'debtStato';
         foglioVal.textContent = 'non caricato, tocca qui';
         foglioVal.className = 'debtVal zero';
         netVal.textContent = '';
@@ -673,7 +723,20 @@
 
       var mio = fogliDebito[TABS[persona][conto]] || { meta: 0 };
       var suo = fogliDebito[TABS[altra][conto]] || { meta: 0 };
-      saldaBtn.disabled = false;
+
+      // Il "saldato" azzera spunte in modo irreversibile alla cieca se il numero
+      // sotto gli occhi non e' quello del foglio: si blocca finche' non lo e'.
+      saldaBtn.disabled = debitoInCorso || debitoNonAggiornato;
+      if (debitoInCorso) {
+        stato.textContent = 'aggiorno…';
+        stato.className = 'debtStato';
+      } else if (debitoNonAggiornato) {
+        stato.textContent = 'non aggiornato, tocca qui';
+        stato.className = 'debtStato vecchio';
+      } else {
+        stato.textContent = '';
+        stato.className = 'debtStato';
+      }
 
       // Meta condivisa di questo foglio (quanto l'altra persona deve).
       if (mio.meta > 0.005) {
@@ -776,7 +839,10 @@
 
     function caricaDebito(ritardoMs) {
       var mio = ++debitoReq;
-      fogliDebito = null;
+      // Il numero che c'e' resta dov'e'. Azzerarlo qui era il motivo per cui la
+      // card spariva a ogni salvataggio di una spesa condivisa.
+      debitoInCorso = true;
+      debitoNonAggiornato = false;
       document.getElementById('saldaMsg').textContent = '';
       mostraDebito();
       var attesa = ritardoMs
@@ -789,14 +855,20 @@
         })
         .then(function (fogli) {
           if (mio !== debitoReq) return; // superata da una lettura piu' recente
-          fogliDebito = fogli;
+          debitoInCorso = false;
+          fogliDebito = fogli; // il foglio ha sempre ragione sul conto locale
           mostraDebito();
         })
         .catch(function () {
           if (mio !== debitoReq) return;
-          // Meglio dire che non si sa, che mostrare un numero di ieri: su questo
-          // numero si decide chi paga, e uno sbagliato e' peggio di nessuno.
-          fogliDebito = 'errore';
+          debitoInCorso = false;
+          // Senza nessun numero si dice che non si sa: su questo numero si
+          // decide chi paga, e uno sbagliato e' peggio di nessuno. Con un numero
+          // gia' a schermo lo si tiene, marcato "non aggiornato" e cliccabile:
+          // e' della stessa sessione ed e' aritmeticamente corretto, mentre
+          // cancellarlo per una lettura andata storta non informa nessuno.
+          if (fogliDebito && fogliDebito !== 'errore') debitoNonAggiornato = true;
+          else fogliDebito = 'errore';
           mostraDebito();
         });
     }
@@ -832,6 +904,9 @@
     // al ritentativo automatico, che intasava la coda davanti alle scritture.
     document.getElementById('debtFoglioVal').addEventListener('click', function () {
       if (fogliDebito === 'errore') caricaDebito();
+    });
+    document.getElementById('debtStato').addEventListener('click', function () {
+      if (debitoNonAggiornato) caricaDebito();
     });
 
     caricaDebito();
@@ -962,10 +1037,8 @@
         segno = false;
         document.getElementById('checkBox').classList.remove('on');
         document.getElementById('checkBox').textContent = '';
-        // Per la spesa condivisa il totale nuovo arriva insieme alla conferma
-        // (?action=cerca&totali=1), quindi qui non si legge niente: si mostrano
-        // i puntini finche' non torna.
-        if (dati.segno) { fogliDebito = null; mostraDebito(); }
+        // Il debito NON si azzera qui. Ci pensa il suo percorso, che parte
+        // dopo e per conto suo; il numero resta a schermo nel frattempo.
       }
 
       apiPostSenzaRitorno(dati)
@@ -985,23 +1058,26 @@
           // raccontare cose non vere.
           riuscita('✓ Spesa aggiunta al foglio!');
           btn.disabled = false;
-          // Una richiesta sola fa due lavori: conferma che la riga c'e' e, per
-          // una spesa condivisa, riporta anche i quattro totali. Erano due
-          // esecuzioni separate, e ogni esecuzione in piu' e' un'altra
-          // occasione perche' Apps Script ci metta venti secondi.
-          // Per la condivisa si aspetta il ricalcolo del foglio, altrimenti i
-          // totali tornerebbero vecchi; per le altre si controlla subito.
-          var attesa = dati.segno ? ATTESA_RILETTURA_MS : 0;
-          setTimeout(function () {
-            verificaSpesaScritta(dati, dati.segno, function (errore, trovata, fogli) {
-              if (!errore && trovata === false) {
-                msg.className = 'err';
-                msg.textContent = 'Non risulta sul foglio, premi di nuovo Aggiungi.';
-                return;
-              }
-              if (fogli) { fogliDebito = fogli; mostraDebito(); }
-            });
-          }, attesa);
+          // Conferma della scrittura: subito, sempre, e senza i quattro totali.
+          // Prima per una spesa condivisa questa chiamata partiva 4,5 secondi
+          // piu' tardi e portava anche il debito, perche' i totali vanno letti
+          // dopo che il foglio ha ricalcolato. Cosi' pero' era la conferma della
+          // riga a pagare l'attesa del debito, su una riga gia' scritta.
+          // ?action=cerca guarda solo la coda del foglio e non aspetta il
+          // ricalcolo: 2,12 secondi misurati subito dopo una scrittura.
+          verificaSpesaScritta(dati, function (errore, trovata) {
+            if (!errore && trovata === false) {
+              msg.className = 'err';
+              msg.textContent = 'Non risulta sul foglio, premi di nuovo Aggiungi.';
+              return;
+            }
+            // La riga c'e': il debito nuovo e' quello di prima piu' meta' spesa.
+            // Si mostra subito, poi la rilettura lo conferma sul foglio.
+            if (dati.segno && !errore) {
+              aggiornaDebitoLocale(dati.gid, dati.spesa);
+              caricaDebito(ATTESA_RILETTURA_MS);
+            }
+          });
         })
         .catch(function () {
           clearTimeout(lenta);
@@ -1016,13 +1092,19 @@
           // solo la risposta a essersi persa. "Risposta non valida" faceva
           // pensare a un errore di salvataggio che quasi mai c'era stato.
           msg.className = ''; msg.textContent = 'Verifico sul foglio…';
-          verificaSpesaScritta(dati, false, function (errore, trovata) {
+          verificaSpesaScritta(dati, function (errore, trovata) {
             if (errore) {
               msg.className = 'err';
               msg.textContent = 'Non riesco a verificare. Guarda il foglio prima di riprovare, '
                 + 'per non inserirla due volte.';
             } else if (trovata) {
               riuscita('✓ Era comunque andata a buon fine');
+              // Anche su questa strada la riga risulta scritta, quindi il debito
+              // e' cambiato allo stesso modo.
+              if (dati.segno) {
+                aggiornaDebitoLocale(dati.gid, dati.spesa);
+                caricaDebito(ATTESA_RILETTURA_MS);
+              }
             } else {
               msg.className = 'err';
               msg.textContent = 'Non salvata, premi di nuovo Aggiungi.';
@@ -1050,11 +1132,15 @@
     // rivelati controproducenti: interrompere non ferma l'esecuzione, quindi il
     // secondo tentativo si accodava dietro al primo che stava ancora girando e
     // scadeva anche lui. Visto in diretta, due volte di fila.
-    function verificaSpesaScritta(dati, conTotali, cb) {
+    // Non chiede piu' "&totali=1". Il backend lo accetta ancora, ma attaccare i
+    // quattro totali del debito a questa richiesta le faceva leggere quattro
+    // fogli interi e la obbligava ad aspettare il ricalcolo: la conferma di una
+    // riga gia' scritta finiva per costare quanto il calcolo del debito. Il
+    // debito se li legge da solo, quando gli pare.
+    function verificaSpesaScritta(dati, cb) {
       var url = API + '?action=cerca&gid=' + dati.gid
         + '&importo=' + encodeURIComponent(String(dati.spesa).replace(',', '.'))
-        + '&nota=' + encodeURIComponent(String(dati.nota || '').trim())
-        + (conTotali ? '&totali=1' : '');
+        + '&nota=' + encodeURIComponent(String(dati.nota || '').trim());
 
       var ctrlV = window.AbortController ? new AbortController() : null;
       var scadutoV = setTimeout(function () { if (ctrlV) ctrlV.abort(); }, 30000);
@@ -1069,7 +1155,7 @@
           if (!j || !j.ok || typeof j.trovata !== 'boolean') {
             throw new Error('risposta non valida');
           }
-          cb(null, j.trovata, j.fogli || null);
+          cb(null, j.trovata);
         })
         .catch(function (e) {
           clearTimeout(scadutoV);
