@@ -645,7 +645,7 @@
       }
       if (fogliDebito === 'errore') {
         saldaBtn.disabled = true;
-        foglioVal.textContent = 'non caricato, riprova';
+        foglioVal.textContent = 'non caricato, tocca qui';
         foglioVal.className = 'debtVal zero';
         netVal.textContent = '';
         return;
@@ -686,11 +686,29 @@
     // ?action=debiti risponde con il suo JSON informativo, senza "fogli": in
     // quel caso si ripiega sulle due letture per valuta, che esistono da
     // sempre. Senza questo la card resterebbe su "non caricato" fino al deploy.
+    // UN SOLO tentativo, niente ritentativi. Contro-intuitivo ma misurato.
+    //
+    // Interrompere una fetch non ferma l'esecuzione su Apps Script, quindi una
+    // lettura fallita continua a occupare la coda e il ritentativo ne aggiunge
+    // un'altra. Visto in diretta: ?action=debiti 21,3 s con esito 404, poi il
+    // ritentativo 40,6 s e di nuovo 404. Quelle due hanno tenuto occupata la
+    // coda per un minuto, e la spesa scritta in quel minuto e' rimasta in fila
+    // dietro fino a scadere. Il debito e' un'informazione, la scrittura no:
+    // meglio una card che dice "non caricato" che una scrittura bloccata.
+    // Toccando la card si riprova a mano.
     function leggiTuttiIDebiti() {
-      return apiGet(API + '?action=debiti').then(function (j) {
-        if (j && j.fogli) return j.fogli;
-        return leggiDebitiPerValuta();
-      });
+      var ctrl = window.AbortController ? new AbortController() : null;
+      var scaduto = setTimeout(function () { if (ctrl) ctrl.abort(); }, 45000);
+      var opz = { cache: 'no-store' };
+      if (ctrl) opz.signal = ctrl.signal;
+      return fetch(API + '?action=debiti&_=' + Date.now(), opz)
+        .then(leggiRisposta)
+        .then(function (j) {
+          clearTimeout(scaduto);
+          if (j && j.fogli) return j.fogli;
+          return leggiDebitiPerValuta();
+        })
+        .catch(function (e) { clearTimeout(scaduto); throw e; });
     }
 
     function leggiDebitiPerValuta() {
@@ -789,6 +807,12 @@
         }
       } catch (e) { /* modalita' privata: pazienza */ }
     })();
+
+    // Se la lettura non e' riuscita, toccare la card riprova. E' l'alternativa
+    // al ritentativo automatico, che intasava la coda davanti alle scritture.
+    document.getElementById('debtFoglioVal').addEventListener('click', function () {
+      if (fogliDebito === 'errore') caricaDebito();
+    });
 
     caricaDebito();
 
