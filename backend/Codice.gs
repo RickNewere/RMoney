@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v32';
+var VERSION = 'v33';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -236,8 +236,18 @@ function _json(obj) {
 var _ssAperto = null;
 var _fogliPerGid = null;
 
+// Lo script vive DENTRO il foglio (Estensioni > Apps Script), quindi il foglio
+// e' gia' a disposizione: getActiveSpreadsheet() non deve andarlo a cercare,
+// openById si'. Misurato nel passo "foglio" di una scrittura: da 236 a 1593 ms,
+// in media circa 450. Sono i millisecondi piu' facili da togliere.
+// Il ripiego su openById resta per sicurezza: se un giorno lo script venisse
+// spostato fuori dal foglio, getActiveSpreadsheet tornerebbe null e senza
+// questo smetterebbe di funzionare tutto.
 function _ss() {
-  if (!_ssAperto) _ssAperto = SpreadsheetApp.openById(SPREADSHEET_ID);
+  if (!_ssAperto) {
+    try { _ssAperto = SpreadsheetApp.getActiveSpreadsheet(); } catch (e) { _ssAperto = null; }
+    if (!_ssAperto) _ssAperto = SpreadsheetApp.openById(SPREADSHEET_ID);
+  }
   return _ssAperto;
 }
 
