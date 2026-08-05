@@ -931,8 +931,20 @@
       };
 
       btn.disabled = true; msg.className = ''; msg.textContent = 'Salvataggio…';
+      // Una scrittura si chiude di solito in 2,5-5 secondi, ma ogni tanto
+      // Apps Script ci mette molto di piu' (misurati 12 e 28 secondi su otto
+      // prove) e non c'e' niente lato app che possa accorciarlo: lo script
+      // scrive in 1-2 secondi, il resto e' l'avvio dell'esecuzione e il
+      // ricalcolo del foglio. Almeno lo si dice, invece di lasciare
+      // "Salvataggio…" fermo e far pensare che sia piantata.
+      var lenta = setTimeout(function () {
+        if (msg.textContent === 'Salvataggio…') {
+          msg.textContent = 'Salvataggio… ci sta mettendo più del solito, non premere di nuovo';
+        }
+      }, 7000);
       apiPost(dati)
         .then(function (j) {
+          clearTimeout(lenta);
           if (j && j.ok) {
             msg.className = 'ok'; msg.textContent = '✓ Spesa aggiunta al foglio!';
             document.getElementById('spesa').value = '';
@@ -949,6 +961,7 @@
           btn.disabled = false;
         })
         .catch(function () {
+          clearTimeout(lenta);
           // Qui NON si puo' ripetere la POST alla cieca: la richiesta potrebbe
           // essere arrivata e la riga essere gia' sul foglio, e un secondo
           // invio scriverebbe la spesa due volte. Si va invece a guardare se
