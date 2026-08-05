@@ -417,14 +417,21 @@
     // La richiesta scaduta continua a occupare la coda, quindi un tetto troppo
     // corto non libera niente, produce solo un falso allarme.
     //
-    // 20 s: misurate su v29, sette scritture su otto si chiudono fra 2,5 e 3,5
-    // secondi anche con una lettura gia' in coda, quindi c'e' sei volte il
-    // margine. Oltre quel punto non conviene continuare ad aspettare: la
-    // verifica sul foglio (?action=cerca) risponde in due secondi e da' una
-    // risposta certa, quindi arrendersi presto porta prima al risultato.
-    // Misurato nel caso peggiore: 20 s di attesa piu' 2 di verifica, contro i
-    // 30 piu' 2 di prima.
-    var TETTO_POST_MS = 20000;
+    // 45 s, e il motivo per cui NON e' piu' corto e' la lezione piu' importante
+    // di tutta questa storia.
+    //
+    // Interrompere una fetch non ferma l'esecuzione su Apps Script: resta viva
+    // e continua a occupare la coda. Un tetto corto quindi non libera niente,
+    // aggiunge un'esecuzione zombie. Con 20 s si e' visto in diretta il
+    // disastro: POST interrotta a 20,0 s, poi la verifica interrotta a 15,0 s,
+    // poi il secondo tentativo di verifica interrotto ad altri 15,0 s. Tre
+    // zombie in coda, cinquanta secondi buttati, e la spesa era gia' scritta
+    // dal primo tentativo.
+    //
+    // Con un tetto generoso la stessa scrittura sarebbe semplicemente arrivata
+    // in fondo, una volta sola. Nel caso normale non cambia niente: la
+    // scrittura si chiude in 3 secondi e questo numero non lo tocca nessuno.
+    var TETTO_POST_MS = 45000;
 
     function apiPost(corpo) {
       var ctrl = window.AbortController ? new AbortController() : null;
@@ -989,7 +996,10 @@
     // Chiede a ?action=cerca, che guarda solo la coda del foglio e due colonne.
     // Prima usava ?action=spese, che ricalcola un mese intero su due fogli:
     // l'endpoint piu' pesante, chiesto nel momento peggiore.
-    // Due tentativi, perche' un fallimento qui lascia l'utente nel dubbio.
+    // UN tentativo, con un tetto generoso. I due tentativi da 15 s si sono
+    // rivelati controproducenti: interrompere non ferma l'esecuzione, quindi il
+    // secondo tentativo si accodava dietro al primo che stava ancora girando e
+    // scadeva anche lui. Visto in diretta, due volte di fila.
     function verificaSpesaScritta(dati, cb, tentativo) {
       tentativo = tentativo || 0;
       var url = API + '?action=cerca&gid=' + dati.gid
@@ -997,7 +1007,7 @@
         + '&nota=' + encodeURIComponent(String(dati.nota || '').trim());
 
       var ctrlV = window.AbortController ? new AbortController() : null;
-      var scadutoV = setTimeout(function () { if (ctrlV) ctrlV.abort(); }, 15000);
+      var scadutoV = setTimeout(function () { if (ctrlV) ctrlV.abort(); }, 30000);
       // Stessa precauzione di apiGet: URL sempre diversa, altrimenti il secondo
       // tentativo puo' ripescare dalla cache un redirect gia' consumato.
       var opzV = { cache: 'no-store' };
@@ -1013,8 +1023,7 @@
         })
         .catch(function (e) {
           clearTimeout(scadutoV);
-          if (tentativo >= 1) { cb(e); return; }
-          setTimeout(function () { verificaSpesaScritta(dati, cb, tentativo + 1); }, 2000);
+          cb(e);
         });
     }
 
