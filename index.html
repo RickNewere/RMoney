@@ -492,10 +492,10 @@
       if (note.length) riempiCategorie(sel, note);
       else sel.innerHTML = '<option value="">Caricamento…</option>';
 
-      // Un foglio si chiede UNA volta per sessione. Prima partiva una richiesta
-      // a ogni tocco su Persona o Conto, per un elenco che non cambia mai: sono
-      // richieste che si mettono in coda davanti a quella che conta, e Apps
-      // Script serializza, quindi rallentavano l'inserimento di una spesa.
+      // Con un elenco gia' noto e recente non si tocca la rete: cambiare tab
+      // non deve costare una richiesta (vedi categorieDaRinfrescare).
+      if (!categorieDaRinfrescare()) return;
+      // E comunque un foglio si chiede una volta sola per sessione.
       if (catLetti[mioGid]) return;
       catLetti[mioGid] = true;
 
@@ -544,12 +544,37 @@
     // Tenendo l'unione di tutto quello che si e' visto sui quattro fogli, ogni
     // categoria resta scegliibile ovunque e non "sparisce" cambiando conto.
     var CHIAVE_CAT = 'rmoney_categorie';
+    var CHIAVE_CAT_QUANDO = 'rmoney_categorie_quando';
+    var ETA_MAX_CAT_MS = 24 * 60 * 60 * 1000;
 
     function categorieNote() {
       try {
         var v = JSON.parse(localStorage.getItem(CHIAVE_CAT) || '[]');
         return (v && v.length) ? v : [];
       } catch (e) { return []; }
+    }
+
+    // Si chiedono al foglio SOLO se non se ne conosce nessuna, o se l'elenco ha
+    // piu' di un giorno.
+    //
+    // Era il difetto piu' grosso rimasto. Toccando un foglio mai aperto in
+    // quella sessione partiva una richiesta per le categorie, che legge tutta
+    // la colonna piu' la convalida dati: misurata a 26,0 s con esito 404, e il
+    // ritentativo a 45,0 s. Apps Script serializza, quindi la spesa scritta
+    // subito dopo restava in coda dietro quella e finiva su "Verifico sul
+    // foglio…". Capitava su Roberta Euro e sui due fogli in franchi, e NON su
+    // Riccardo Euro, che essendo il tab di partenza le aveva gia' prese
+    // all'apertura: e' il "funziona solo Riccardo Euro" che si vedeva.
+    //
+    // L'elenco e' l'unione di quello visto su tutti i fogli e non cambia quasi
+    // mai (una categoria nuova si aggiunge a mano sul foglio, non dall'app),
+    // quindi un giro al giorno basta.
+    function categorieDaRinfrescare() {
+      if (!categorieNote().length) return true;
+      try {
+        var quando = parseInt(localStorage.getItem(CHIAVE_CAT_QUANDO) || '0', 10) || 0;
+        return (Date.now() - quando) > ETA_MAX_CAT_MS;
+      } catch (e) { return true; }
     }
 
     function salvaCategorie(cats) {
@@ -561,6 +586,7 @@
         });
         unione.sort(function (a, b) { return a.localeCompare(b, 'it'); });
         localStorage.setItem(CHIAVE_CAT, JSON.stringify(unione));
+        localStorage.setItem(CHIAVE_CAT_QUANDO, String(Date.now()));
       } catch (e) { /* spazio pieno o modalita' privata: pazienza */ }
     }
 
