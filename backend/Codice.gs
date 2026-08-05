@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v30';
+var VERSION = 'v31';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -157,7 +157,11 @@ function doGet(e) {
   return _json({ ok: true, version: VERSION, hint: 'Usa ?action=categorie|debito|debug, oppure POST per aggiungere/saldare.' });
 }
 
+// Istante in cui l'esecuzione e' davvero partita. Confrontato col momento in
+// cui il client ha spedito la richiesta, dice quanto e' costato ad Apps Script
+// mettere in moto l'esecuzione, che e' tempo fuori dal nostro codice.
 function doPost(e) {
+  var _avvio = Date.now();
   try {
     var body = JSON.parse(e.postData.contents);
     if (body.op === 'salda') {
@@ -171,7 +175,28 @@ function doPost(e) {
       return _json(svuotaRiga(parseInt(body.gid, 10), parseInt(body.riga, 10), body.atteso));
     }
     var esito = aggiungiSpesa(body);
-    return _json({ ok: true, riga: esito.riga, ms: esito.ms, passi: esito.passi });
+
+    // Lo scarico delle scritture sul foglio va MISURATO, non subito.
+    //
+    // Senza questa chiamata il flush avviene comunque, ma dopo l'ultima riga di
+    // codice: fuori dal cronometro, quindi invisibile. E' li' che il foglio
+    // ricalcola SOMMARIO e pivot, ed e' il primo sospettato per le scritture
+    // che dal telefono durano 12 o 28 secondi mentre lo script dichiara di
+    // aver finito in due. Chiamarlo qui non aggiunge lavoro, sposta solo il
+    // conto dentro la parte che si vede.
+    var tFlush = Date.now();
+    SpreadsheetApp.flush();
+    var msFlush = Date.now() - tFlush;
+
+    return _json({
+      ok: true, riga: esito.riga,
+      ms: esito.ms, passi: esito.passi,
+      msFlush: msFlush,
+      // Quanto e' durata l'esecuzione per intero e quando e' partita: il client
+      // confronta con i propri tempi e capisce quanto sta fuori dallo script.
+      msTotale: Date.now() - _avvio,
+      avvio: _avvio
+    });
   } catch (err) {
     return _json({ ok: false, error: String((err && err.message) || err) });
   }
