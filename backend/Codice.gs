@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v31';
+var VERSION = 'v32';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -113,10 +113,19 @@ function doGet(e) {
   }
   if (action === 'cerca') {
     var gidT = parseInt(e.parameter.gid, 10);
-    return _json({
+    var rispCerca = {
       ok: true, version: VERSION,
       trovata: cercaSpesa(gidT, parseFloat(e.parameter.importo), e.parameter.nota || '')
-    });
+    };
+    // Con "totali=1" si aggiunge il debito dei quattro fogli.
+    //
+    // Dopo una spesa condivisa il client deve fare due cose: accertarsi che la
+    // riga ci sia, e rileggere il totale. Erano due richieste, quindi due
+    // esecuzioni in piu' sullo stesso script, e ogni esecuzione e' un'occasione
+    // in cui Apps Script puo' metterci venti secondi. Chiedendole insieme
+    // l'inserimento condiviso costa due esecuzioni invece di tre.
+    if (e.parameter.totali) rispCerca.fogli = getTuttiIDebiti();
+    return _json(rispCerca);
   }
   // Elenco riga per riga delle spese condivise, per verificare il debito a mano.
   if (action === 'condivise') {
