@@ -662,6 +662,7 @@
     // lettura che arriva dopo lo conferma, e se mai fosse diversa vince lei.
     var debitoInCorso = false;      // c'e' una lettura in volo
     var debitoNonAggiornato = false; // l'ultima lettura e' fallita, il numero resta
+    var debitoRitentativo = 0;       // quale ritentativo e' in corso, 0 = il primo giro
     var CHIAVI_META = ['totale', 'meta', 'conteggio'];
 
     // Somma al totale in memoria una spesa condivisa appena scritta sul foglio.
@@ -705,19 +706,25 @@
       // mostrare, cioe' alla prima apertura. Se un numero c'e' gia' non si
       // cancella per rileggerlo: si lascia a schermo e si dice di fianco al
       // titolo che sta arrivando quello nuovo.
-      if (!fogliDebito) {
+      if (!fogliDebito || fogliDebito === 'errore') {
         saldaBtn.disabled = true;
-        stato.textContent = ''; stato.className = 'debtStato';
-        foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
-        netVal.textContent = '…'; netVal.className = 'debtVal';
-        return;
-      }
-      if (fogliDebito === 'errore') {
-        saldaBtn.disabled = true;
-        stato.textContent = ''; stato.className = 'debtStato';
-        foglioVal.textContent = 'non caricato, tocca qui';
-        foglioVal.className = 'debtVal zero';
-        netVal.textContent = '';
+        // Una lettura in corso vince sull'errore precedente, altrimenti toccare
+        // la card per riprovare non cambia niente a schermo e sembra rotta.
+        if (debitoInCorso) {
+          stato.textContent = debitoRitentativo ? 'ci mette più del solito, riprovo…' : '';
+          stato.className = 'debtStato';
+          foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
+          netVal.textContent = '…'; netVal.className = 'debtVal';
+        } else if (fogliDebito === 'errore') {
+          stato.textContent = ''; stato.className = 'debtStato';
+          foglioVal.textContent = 'non caricato, tocca qui';
+          foglioVal.className = 'debtVal zero';
+          netVal.textContent = '';
+        } else {
+          stato.textContent = ''; stato.className = 'debtStato';
+          foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
+          netVal.textContent = '…'; netVal.className = 'debtVal';
+        }
         return;
       }
 
@@ -769,19 +776,40 @@
     // ?action=debiti risponde con il suo JSON informativo, senza "fogli": in
     // quel caso si ripiega sulle due letture per valuta, che esistono da
     // sempre. Senza questo la card resterebbe su "non caricato" fino al deploy.
-    // UN SOLO tentativo, niente ritentativi. Contro-intuitivo ma misurato.
     //
-    // Interrompere una fetch non ferma l'esecuzione su Apps Script, quindi una
-    // lettura fallita continua a occupare la coda e il ritentativo ne aggiunge
-    // un'altra. Visto in diretta: ?action=debiti 21,3 s con esito 404, poi il
-    // ritentativo 40,6 s e di nuovo 404. Quelle due hanno tenuto occupata la
-    // coda per un minuto, e la spesa scritta in quel minuto e' rimasta in fila
-    // dietro fino a scadere. Il debito e' un'informazione, la scrittura no:
-    // meglio una card che dice "non caricato" che una scrittura bloccata.
-    // Toccando la card si riprova a mano.
-    function leggiTuttiIDebiti() {
+    // TRE tentativi. Qui c'era scritto "UN SOLO tentativo, niente ritentativi",
+    // e il motivo era che interrompere una fetch non ferma l'esecuzione su Apps
+    // Script: la lettura abbandonata continuava a girare e il ritentativo si
+    // aggiungeva, e in quel minuto una spesa scritta restava in fila dietro.
+    // Quel motivo non esiste piu': la scrittura non passa piu' di qui (posta con
+    // redirect: 'manual' e si conferma da sola con ?action=cerca) e il debito ha
+    // il suo percorso separato, quindi una lettura abbandonata non puo' piu'
+    // mettersi davanti a niente che l'utente stia aspettando.
+    //
+    // Senza ritentativi la card finiva in errore per sempre alla prima botta, ed
+    // e' quello che si vedeva sull'iPhone: "non caricato, tocca qui" su un
+    // backend perfettamente sano. Misurato, sei letture di fila dal browser:
+    //
+    //   1a  45,0 s  interrotta dal tetto
+    //   2a   4,2 s  ok
+    //   3a  38,3 s  ok
+    //   4a  33,3 s  ok
+    //   5a  35,1 s  404
+    //
+    // Scomposta nelle sue due tappe, la colpa non e' della consegna (il ritiro
+    // da googleusercontent sta sempre fra 360 e 514 ms) ma dell'avvio: 26,9 s e
+    // 27,0 s a freddo contro 2,8-3,1 s a caldo. E non e' il foglio: la stessa
+    // chiamata con una action inesistente, che il foglio non lo apre nemmeno,
+    // costa 1,0-2,5 s, quindi leggere i quattro fogli pesa 0,3-2,6 s in tutto.
+    // E' Apps Script che ci mette mezzo minuto a partire, esattamente come sulle
+    // scritture lente. Non si accorcia dal client: si riprova.
+    var TENTATIVI_DEBITO = 3;
+    var TETTO_DEBITO_MS = 45000; // generoso: a freddo l'avvio da solo prende 27 s
+    var PAUSE_DEBITO_MS = [2000, 5000];
+
+    function leggiDebitiUnaVolta() {
       var ctrl = window.AbortController ? new AbortController() : null;
-      var scaduto = setTimeout(function () { if (ctrl) ctrl.abort(); }, 45000);
+      var scaduto = setTimeout(function () { if (ctrl) ctrl.abort(); }, TETTO_DEBITO_MS);
       var opz = { cache: 'no-store' };
       if (ctrl) opz.signal = ctrl.signal;
       return fetch(API + '?action=debiti&_=' + Date.now(), opz)
@@ -792,6 +820,24 @@
           return leggiDebitiPerValuta();
         })
         .catch(function (e) { clearTimeout(scaduto); throw e; });
+    }
+
+    // "ancoraValida" fa smettere la catena se nel frattempo e' partita una
+    // lettura piu' recente, altrimenti i ritentativi di quella vecchia
+    // continuerebbero a girare a vuoto per un minuto e mezzo.
+    // "onRitento" serve solo a dire all'utente che ci sta mettendo tanto.
+    function leggiTuttiIDebiti(ancoraValida, onRitento, tentativo) {
+      tentativo = tentativo || 0;
+      return leggiDebitiUnaVolta().catch(function (e) {
+        if (ancoraValida && !ancoraValida()) throw e;
+        if (tentativo + 1 >= TENTATIVI_DEBITO) throw e;
+        if (onRitento) onRitento(tentativo + 1);
+        var pausa = PAUSE_DEBITO_MS[tentativo] || 5000;
+        return new Promise(function (ok) { setTimeout(ok, pausa); })
+          .then(function () {
+            return leggiTuttiIDebiti(ancoraValida, onRitento, tentativo + 1);
+          });
+      });
     }
 
     function leggiDebitiPerValuta() {
@@ -843,6 +889,7 @@
       // card spariva a ogni salvataggio di una spesa condivisa.
       debitoInCorso = true;
       debitoNonAggiornato = false;
+      debitoRitentativo = 0;
       document.getElementById('saldaMsg').textContent = '';
       mostraDebito();
       var attesa = ritardoMs
@@ -851,7 +898,16 @@
       return attesa
         .then(function () {
           if (mio !== debitoReq) return null;
-          return leggiTuttiIDebiti();
+          return leggiTuttiIDebiti(
+            function () { return mio === debitoReq; },
+            function (n) {
+              if (mio !== debitoReq) return;
+              // Su una card fredda non c'e' nessun numero da guardare, quindi
+              // conviene dire perche' i puntini sono ancora li'.
+              debitoRitentativo = n;
+              mostraDebito();
+            }
+          );
         })
         .then(function (fogli) {
           if (mio !== debitoReq) return; // superata da una lettura piu' recente
@@ -862,6 +918,7 @@
         .catch(function () {
           if (mio !== debitoReq) return;
           debitoInCorso = false;
+          debitoRitentativo = 0;
           // Senza nessun numero si dice che non si sa: su questo numero si
           // decide chi paga, e uno sbagliato e' peggio di nessuno. Con un numero
           // gia' a schermo lo si tiene, marcato "non aggiornato" e cliccabile:
@@ -902,11 +959,23 @@
 
     // Se la lettura non e' riuscita, toccare la card riprova. E' l'alternativa
     // al ritentativo automatico, che intasava la coda davanti alle scritture.
-    document.getElementById('debtFoglioVal').addEventListener('click', function () {
-      if (fogliDebito === 'errore') caricaDebito();
+    // Bersaglio grande: tutta la card, non la scritta piccola. Su un telefono
+    // "tocca qui" su due parole in grigio e' un bersaglio da pochi millimetri.
+    // Il pulsante "Saldato" e' escluso, altrimenti premerlo farebbe anche
+    // ripartire una lettura.
+    document.getElementById('debt').addEventListener('click', function (ev) {
+      if (ev.target.closest('#saldaBtn')) return;
+      if (debitoInCorso) return;
+      if (fogliDebito === 'errore' || debitoNonAggiornato) caricaDebito();
     });
-    document.getElementById('debtStato').addEventListener('click', function () {
-      if (debitoNonAggiornato) caricaDebito();
+
+    // Riprova da sola quando si torna sull'app. Il caso tipico e' proprio
+    // questo: si apre, Apps Script ci mette mezzo minuto a partire, si guarda
+    // altro e si torna. Senza questo bisogna sapere che la card va toccata.
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState !== 'visible') return;
+      if (debitoInCorso) return;
+      if (fogliDebito === 'errore' || debitoNonAggiornato) caricaDebito();
     });
 
     caricaDebito();
