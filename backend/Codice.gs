@@ -101,6 +101,16 @@ function doGet(e) {
   // Prima il client lo chiedeva a ?action=spese, che ricalcola un mese intero
   // su due fogli: l'endpoint piu' pesante che c'e', proprio nel momento in cui
   // la coda e' gia' intasata. Questo legge poche righe in fondo a un foglio.
+  // Censimento delle formule del foglio, in sola lettura.
+  //
+  // Serve a capire cosa ricalcola a ogni scrittura: una spesa aggiunta su un
+  // LOG fa ricalcolare tutto quello che dipende da quel LOG, e quel ricalcolo
+  // finisce nell'attesa dell'utente. Qui si contano le celle con formula scheda
+  // per scheda e si mostrano le formule distinte, per sapere dove guardare
+  // invece di indovinare.
+  if (action === 'formule') {
+    return _json({ ok: true, version: VERSION, schede: censimentoFormule() });
+  }
   if (action === 'cerca') {
     var gidT = parseInt(e.parameter.gid, 10);
     return _json({
@@ -859,6 +869,46 @@ function getDebito(gid, gidPartner) {
     ? _totaleCondivise(gidPartner)
     : { totale: 0, meta: 0, conteggio: 0 };
   return { mio: mio, partner: partner, netto: mio.meta - partner.meta };
+}
+
+// SOLA LETTURA. Conta le celle con formula di ogni scheda e riporta le formule
+// distinte, accorciate. Non scrive e non ricalcola niente: getFormulas legge
+// il testo delle formule, non i valori.
+function censimentoFormule() {
+  var fogli = _ss().getSheets();
+  var out = [];
+  for (var i = 0; i < fogli.length; i++) {
+    var f = fogli[i];
+    var righe = f.getLastRow(), colonne = f.getLastColumn();
+    var voce = {
+      nome: f.getName(), gid: f.getSheetId(), nascosta: f.isSheetHidden(),
+      righe: righe, colonne: colonne, conFormula: 0, distinte: []
+    };
+    if (righe > 0 && colonne > 0) {
+      // Bastano le prime righe: le tabelle di riepilogo stanno in alto, e i LOG
+      // di formule non ne hanno. Serve un censimento, non l'inventario.
+      var quante = Math.min(righe, 120);
+      var larghe = Math.min(colonne, 30);
+      var fm = f.getRange(1, 1, quante, larghe).getFormulas();
+      var viste = {};
+      for (var r = 0; r < fm.length; r++) {
+        for (var c = 0; c < fm[r].length; c++) {
+          var t = fm[r][c];
+          if (!t) continue;
+          voce.conFormula++;
+          // Si raggruppano le formule uguali a meno dei riferimenti di riga,
+          // altrimenti l'elenco sarebbe lungo quanto la tabella.
+          var sagoma = t.replace(/\d+/g, '#');
+          if (!viste[sagoma]) {
+            viste[sagoma] = true;
+            if (voce.distinte.length < 12) voce.distinte.push(t.slice(0, 160));
+          }
+        }
+      }
+    }
+    out.push(voce);
+  }
+  return out;
 }
 
 // SOLA LETTURA. Cerca una spesa appena scritta guardando solo la CODA del
