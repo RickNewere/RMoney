@@ -962,9 +962,10 @@
         segno = false;
         document.getElementById('checkBox').classList.remove('on');
         document.getElementById('checkBox').textContent = '';
-        // Spesa condivisa: il totale cambia, ma il foglio sta ricalcolando
-        // e una lettura lanciata adesso resterebbe ferma ad aspettarlo.
-        if (dati.segno) caricaDebito(ATTESA_RILETTURA_MS);
+        // Per la spesa condivisa il totale nuovo arriva insieme alla conferma
+        // (?action=cerca&totali=1), quindi qui non si legge niente: si mostrano
+        // i puntini finche' non torna.
+        if (dati.segno) { fogliDebito = null; mostraDebito(); }
       }
 
       apiPostSenzaRitorno(dati)
@@ -984,12 +985,23 @@
           // raccontare cose non vere.
           riuscita('✓ Spesa aggiunta al foglio!');
           btn.disabled = false;
-          verificaSpesaScritta(dati, function (errore, trovata) {
-            if (!errore && trovata === false) {
-              msg.className = 'err';
-              msg.textContent = 'Non risulta sul foglio, premi di nuovo Aggiungi.';
-            }
-          });
+          // Una richiesta sola fa due lavori: conferma che la riga c'e' e, per
+          // una spesa condivisa, riporta anche i quattro totali. Erano due
+          // esecuzioni separate, e ogni esecuzione in piu' e' un'altra
+          // occasione perche' Apps Script ci metta venti secondi.
+          // Per la condivisa si aspetta il ricalcolo del foglio, altrimenti i
+          // totali tornerebbero vecchi; per le altre si controlla subito.
+          var attesa = dati.segno ? ATTESA_RILETTURA_MS : 0;
+          setTimeout(function () {
+            verificaSpesaScritta(dati, dati.segno, function (errore, trovata, fogli) {
+              if (!errore && trovata === false) {
+                msg.className = 'err';
+                msg.textContent = 'Non risulta sul foglio, premi di nuovo Aggiungi.';
+                return;
+              }
+              if (fogli) { fogliDebito = fogli; mostraDebito(); }
+            });
+          }, attesa);
         })
         .catch(function () {
           clearTimeout(lenta);
@@ -1004,7 +1016,7 @@
           // solo la risposta a essersi persa. "Risposta non valida" faceva
           // pensare a un errore di salvataggio che quasi mai c'era stato.
           msg.className = ''; msg.textContent = 'Verifico sul foglio…';
-          verificaSpesaScritta(dati, function (errore, trovata) {
+          verificaSpesaScritta(dati, false, function (errore, trovata) {
             if (errore) {
               msg.className = 'err';
               msg.textContent = 'Non riesco a verificare. Guarda il foglio prima di riprovare, '
@@ -1038,11 +1050,11 @@
     // rivelati controproducenti: interrompere non ferma l'esecuzione, quindi il
     // secondo tentativo si accodava dietro al primo che stava ancora girando e
     // scadeva anche lui. Visto in diretta, due volte di fila.
-    function verificaSpesaScritta(dati, cb, tentativo) {
-      tentativo = tentativo || 0;
+    function verificaSpesaScritta(dati, conTotali, cb) {
       var url = API + '?action=cerca&gid=' + dati.gid
         + '&importo=' + encodeURIComponent(String(dati.spesa).replace(',', '.'))
-        + '&nota=' + encodeURIComponent(String(dati.nota || '').trim());
+        + '&nota=' + encodeURIComponent(String(dati.nota || '').trim())
+        + (conTotali ? '&totali=1' : '');
 
       var ctrlV = window.AbortController ? new AbortController() : null;
       var scadutoV = setTimeout(function () { if (ctrlV) ctrlV.abort(); }, 30000);
@@ -1057,7 +1069,7 @@
           if (!j || !j.ok || typeof j.trovata !== 'boolean') {
             throw new Error('risposta non valida');
           }
-          cb(null, j.trovata);
+          cb(null, j.trovata, j.fogli || null);
         })
         .catch(function (e) {
           clearTimeout(scadutoV);
