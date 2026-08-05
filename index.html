@@ -810,7 +810,17 @@
     // E' Apps Script che ci mette mezzo minuto a partire, esattamente come sulle
     // scritture lente. Non si accorcia dal client: si riprova.
     var TETTO_DEBITO_MS = 45000; // generoso: a freddo l'avvio da solo prende 27 s
-    var PAUSE_DEBITO_MS = [2000, 5000, 10000, 20000, 30000]; // poi resta a 30 s
+    // Le pause salgono fino a due minuti. Con un tetto basso, su un backend in
+    // difficolta' ogni pagina aperta gli tirava addosso due esecuzioni al minuto
+    // per sempre, cioe' carico proprio quando ne ha meno margine. Il debito e'
+    // un'informazione: puo' aspettare, la scrittura no.
+    var PAUSE_DEBITO_MS = [2000, 5000, 10000, 20000, 30000, 60000, 120000];
+
+    // Vero da quando parte una scrittura a quando la sua conferma e' finita.
+    // Il debito non deve MAI avere una richiesta in volo in quella finestra:
+    // separare i due percorsi serviva a non farli aspettare a vicenda, ma se poi
+    // si contendono lo stesso backend il salvataggio torna lento lo stesso.
+    var scritturaInCorso = false;
 
     function leggiDebitiUnaVolta() {
       var ctrl = window.AbortController ? new AbortController() : null;
@@ -847,6 +857,8 @@
         debitoAttesa = setTimeout(function () { debitoAttesa = null; ok(); }, ritardoMs);
       }).then(function () {
         if (mio !== debitoReq) return;
+        // Una scrittura in corso ha la precedenza assoluta: si riprova fra poco.
+        if (scritturaInCorso) return provaDebito(mio, 2000);
         return leggiDebitiUnaVolta().then(function (fogli) {
           if (mio !== debitoReq) return;
           debitoInCorso = false;
@@ -1102,6 +1114,16 @@
           msg.textContent = 'Salvataggio… ci sta mettendo più del solito, non premere di nuovo';
         }
       }, 7000);
+      // Da qui il debito sta zitto: niente sue richieste finche' la scrittura
+      // non e' conclusa. Se una sua lettura e' gia' in volo si lascia finire,
+      // ma non ne parte nessun'altra. Il timer del prossimo tentativo NON si
+      // annulla: annullarlo lascerebbe la catena orfana e il debito fermo sui
+      // puntini per sempre dopo una spesa senza spunta. Scade, vede questo
+      // interruttore e si risposta avanti da solo.
+      scritturaInCorso = true;
+      function scritturaFinita() {
+        scritturaInCorso = false;
+      }
       function riuscita(testo) {
         msg.className = 'ok'; msg.textContent = testo;
         document.getElementById('spesa').value = '';
@@ -1119,6 +1141,7 @@
           // Se per qualche motivo il corpo si e' potuto leggere e dice che e'
           // andata male, si riporta l'errore vero.
           if (esito.dati && esito.dati.ok === false) {
+            scritturaFinita();
             msg.className = 'err';
             msg.textContent = 'Errore: ' + (esito.dati.error || 'sconosciuto');
             btn.disabled = false;
@@ -1138,6 +1161,7 @@
           // ?action=cerca guarda solo la coda del foglio e non aspetta il
           // ricalcolo: 2,12 secondi misurati subito dopo una scrittura.
           verificaSpesaScritta(dati, function (errore, trovata) {
+            scritturaFinita();
             if (!errore && trovata === false) {
               msg.className = 'err';
               msg.textContent = 'Non risulta sul foglio, premi di nuovo Aggiungi.';
@@ -1165,6 +1189,7 @@
           // pensare a un errore di salvataggio che quasi mai c'era stato.
           msg.className = ''; msg.textContent = 'Verifico sul foglio…';
           verificaSpesaScritta(dati, function (errore, trovata) {
+            scritturaFinita();
             if (errore) {
               msg.className = 'err';
               msg.textContent = 'Non riesco a verificare. Guarda il foglio prima di riprovare, '
