@@ -393,46 +393,33 @@
         });
     }
 
-    // Le scritture NON ritentano mai da sole. La richiesta potrebbe essere
-    // arrivata comunque, e un secondo invio scriverebbe la spesa due volte:
-    // e' esattamente cosi' che e' nato un doppione sul foglio. Chi chiama deve
-    // verificare sul foglio, non reinviare.
+    // Le scritture NON seguono il rimando di Apps Script, e questa e' la
+    // correzione che ha risolto i tempi lunghi.
     //
-    // Ma un tetto di attesa ci vuole lo stesso. Senza, una richiesta che si
-    // pianta lascia la promessa mai risolta e il pulsante resta su
-    // "Salvataggio…" per sempre: e' successo davvero. Allo scadere si fallisce,
-    // e chi chiama va a controllare sul foglio se la scrittura era passata
-    // (verificaSpesaScritta), che e' l'unico modo sicuro di uscire dal dubbio
-    // senza rischiare un doppione.
+    // Una chiamata a /exec e' in DUE tappe: prima Apps Script esegue il codice e
+    // risponde con un rimando, poi il client va a ritirare il risultato da
+    // script.googleusercontent.com. Misurato sul foglio vero, sia da browser sia
+    // da terminale, la prima tappa e' sempre di circa 3 secondi; e' la SECONDA
+    // che ogni tanto si pianta e dopo 15-31 secondi restituisce una pagina di
+    // errore invece dei dati. Sono quelli i "28 secondi" che si vedevano, e in
+    // un caso la seconda tappa ha addirittura restituito la risposta di doGet,
+    // cioe' di tutt'altra richiesta.
     //
-    // Il tetto va tarato sull'ATTESA IN CODA, non sulla durata della scrittura.
+    // Ma quel giro di ritorno non serve: quando Apps Script risponde con il
+    // rimando, il codice ha gia' girato e la riga e' gia' sul foglio. Quindi
+    // con redirect:'manual' ci si ferma li'. La conferma arriva subito dopo da
+    // ?action=cerca, che e' un'esecuzione corta.
+    // Provato: con il rimando seguito, una scrittura su quattro tornava
+    // illeggibile; senza, sei su sei a buon fine.
     //
-    // La scrittura da sola si chiude in un paio di secondi (v25 in poi). Con
-    // quel numero in testa era stato messo a 15 s, ed e' stato un errore: Apps
-    // Script serializza le esecuzioni, quindi una scrittura puo' restare ferma
-    // dietro una lettura da 4-6 s, a volte dietro due. A 15 s scadeva e usciva
-    // "risposta non valida" su una spesa che invece era stata scritta.
-    //
-    // Peggio: interrompere la fetch NON ferma l'esecuzione su Apps Script.
-    // La richiesta scaduta continua a occupare la coda, quindi un tetto troppo
-    // corto non libera niente, produce solo un falso allarme.
-    //
-    // 45 s, e il motivo per cui NON e' piu' corto e' la lezione piu' importante
-    // di tutta questa storia.
-    //
-    // Interrompere una fetch non ferma l'esecuzione su Apps Script: resta viva
-    // e continua a occupare la coda. Un tetto corto quindi non libera niente,
-    // aggiunge un'esecuzione zombie. Con 20 s si e' visto in diretta il
-    // disastro: POST interrotta a 20,0 s, poi la verifica interrotta a 15,0 s,
-    // poi il secondo tentativo di verifica interrotto ad altri 15,0 s. Tre
-    // zombie in coda, cinquanta secondi buttati, e la spesa era gia' scritta
-    // dal primo tentativo.
-    //
-    // Con un tetto generoso la stessa scrittura sarebbe semplicemente arrivata
-    // in fondo, una volta sola. Nel caso normale non cambia niente: la
-    // scrittura si chiude in 3 secondi e questo numero non lo tocca nessuno.
+    // Il tetto resta generoso perche' interrompere una fetch NON ferma
+    // l'esecuzione su Apps Script: un tetto corto non libera niente, aggiunge
+    // solo un'esecuzione che continua a girare per conto suo.
     var TETTO_POST_MS = 45000;
 
+    // Con il rimando seguito: serve dove la risposta va letta davvero (saldare,
+    // annullare, cancellare). Sono operazioni rare, quindi il rischio di
+    // incappare nella seconda tappa lenta si paga volentieri.
     function apiPost(corpo) {
       var ctrl = window.AbortController ? new AbortController() : null;
       var scaduto = setTimeout(function () { if (ctrl) ctrl.abort(); }, TETTO_POST_MS);
@@ -445,6 +432,32 @@
       return fetch(API, opzioni)
         .then(leggiRisposta)
         .then(function (j) { clearTimeout(scaduto); return j; })
+        .catch(function (e) { clearTimeout(scaduto); throw e; });
+    }
+
+    // Senza seguire il rimando: per l'inserimento di una spesa, che e'
+    // l'operazione frequente e quella che deve essere veloce. Si chiude appena
+    // Apps Script ha eseguito, senza aspettare il ritiro del risultato. Il
+    // corpo della risposta non e' leggibile, e infatti non lo si usa: la
+    // conferma la da' ?action=cerca subito dopo.
+    function apiPostSenzaRitorno(corpo) {
+      var ctrl = window.AbortController ? new AbortController() : null;
+      var scaduto = setTimeout(function () { if (ctrl) ctrl.abort(); }, TETTO_POST_MS);
+      var opzioni = {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(corpo)
+      };
+      if (ctrl) opzioni.signal = ctrl.signal;
+      return fetch(API, opzioni)
+        .then(function (r) {
+          clearTimeout(scaduto);
+          // Caso normale: rimando non seguito, niente da leggere e niente da
+          // leggere serve. Se un browser lo seguisse comunque, si legge.
+          if (r.type === 'opaqueredirect' || r.status === 0) return { dati: null };
+          return leggiRisposta(r).then(function (j) { return { dati: j }; });
+        })
         .catch(function (e) { clearTimeout(scaduto); throw e; });
     }
 
@@ -942,23 +955,41 @@
           msg.textContent = 'Salvataggio… ci sta mettendo più del solito, non premere di nuovo';
         }
       }, 7000);
-      apiPost(dati)
-        .then(function (j) {
+      function riuscita(testo) {
+        msg.className = 'ok'; msg.textContent = testo;
+        document.getElementById('spesa').value = '';
+        document.getElementById('nota').value = '';
+        segno = false;
+        document.getElementById('checkBox').classList.remove('on');
+        document.getElementById('checkBox').textContent = '';
+        // Spesa condivisa: il totale cambia, ma il foglio sta ricalcolando
+        // e una lettura lanciata adesso resterebbe ferma ad aspettarlo.
+        if (dati.segno) caricaDebito(ATTESA_RILETTURA_MS);
+      }
+
+      apiPostSenzaRitorno(dati)
+        .then(function (esito) {
           clearTimeout(lenta);
-          if (j && j.ok) {
-            msg.className = 'ok'; msg.textContent = '✓ Spesa aggiunta al foglio!';
-            document.getElementById('spesa').value = '';
-            document.getElementById('nota').value = '';
-            segno = false;
-            document.getElementById('checkBox').classList.remove('on');
-            document.getElementById('checkBox').textContent = '';
-            // Spesa condivisa: il totale cambia, ma il foglio sta ricalcolando
-            // e una lettura lanciata adesso resterebbe ferma ad aspettarlo.
-            if (dati.segno) caricaDebito(ATTESA_RILETTURA_MS);
-          } else {
-            msg.className = 'err'; msg.textContent = 'Errore: ' + ((j && j.error) || 'sconosciuto');
+          // Se per qualche motivo il corpo si e' potuto leggere e dice che e'
+          // andata male, si riporta l'errore vero.
+          if (esito.dati && esito.dati.ok === false) {
+            msg.className = 'err';
+            msg.textContent = 'Errore: ' + (esito.dati.error || 'sconosciuto');
+            btn.disabled = false;
+            return;
           }
+          // Apps Script ha eseguito: la riga e' scritta. Si dice subito, e nel
+          // frattempo si conferma sul foglio. Se la conferma dicesse di no, il
+          // messaggio viene corretto: e' l'unico modo di essere veloci senza
+          // raccontare cose non vere.
+          riuscita('✓ Spesa aggiunta al foglio!');
           btn.disabled = false;
+          verificaSpesaScritta(dati, function (errore, trovata) {
+            if (!errore && trovata === false) {
+              msg.className = 'err';
+              msg.textContent = 'Non risulta sul foglio, premi di nuovo Aggiungi.';
+            }
+          });
         })
         .catch(function () {
           clearTimeout(lenta);
@@ -979,13 +1010,7 @@
               msg.textContent = 'Non riesco a verificare. Guarda il foglio prima di riprovare, '
                 + 'per non inserirla due volte.';
             } else if (trovata) {
-              msg.className = 'ok'; msg.textContent = '✓ Era comunque andata a buon fine';
-              document.getElementById('spesa').value = '';
-              document.getElementById('nota').value = '';
-              segno = false;
-              document.getElementById('checkBox').classList.remove('on');
-              document.getElementById('checkBox').textContent = '';
-              if (dati.segno) caricaDebito(ATTESA_RILETTURA_MS);
+              riuscita('✓ Era comunque andata a buon fine');
             } else {
               msg.className = 'err';
               msg.textContent = 'Non salvata, premi di nuovo Aggiungi.';
