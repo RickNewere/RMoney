@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v29';
+var VERSION = 'v30';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -683,52 +683,85 @@ function _isCondivisa(row, idxSplit, idxNota, lastCol) {
 // lettura al tratto importo-spunta porta il blocco a 4 colonne, un quinto dei
 // dati, ed e' quello che permette di rispondere sempre col dato vero del foglio
 // invece che con una copia tenuta da parte.
+// UNA SOLA lettura per foglio: intestazioni e dati insieme.
+//
+// Prima erano due chiamate, _findHeader e poi il blocco dei dati, per quattro
+// fogli: nove viaggi verso Sheets per rispondere a ?action=debiti, ognuno con
+// il suo tempo fisso. Il risultato era un'esecuzione da 4 a 20 secondi, e piu'
+// dura piu' spesso il ritiro della risposta lato Google torna 404 (misurato:
+// ?action=cerca, che legge un foglio solo e chiude in 2 s, non ha mai fallito,
+// mentre ?action=debiti falliva di continuo). Qui si legge un blocco che
+// contiene sia le righe di intestazione sia i dati, e le colonne si ricavano
+// da quello.
+//
+// Le prime 8 colonne bastano per tutti e quattro i LOG (l'ultima che serve e'
+// "split", che sta in quinta); se in quel tratto non si trovano le colonne
+// necessarie si ripiega sulla larghezza intera, quindi un foglio diverso non
+// puo' dare risultati sbagliati, al massimo torna a costare come prima.
+var COLONNE_UTILI = 8;
+
 function _totaleCondivise(gid) {
   var sheet = _getSheetByGid(gid);
-  var h = _findHeader(sheet);
-  var headers = h.headers;
-  var lastCol = h.lastCol;
-
-  var idxData  = _colFor(headers, ['data']);
-  var idxSpesa = _colFor(headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
-  var idxNota  = _colFor(headers, ['dettagl', 'nota', 'note', 'descriz']);
-  var idxSplit = _colFor(headers, ['split']);
-  if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
-  if (idxSpesa < 0 || idxNota < 0) return { totale: 0, meta: 0, conteggio: 0 };
-
-  var firstData = h.row + 1;
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
   var last = sheet.getLastRow();
-  if (last < firstData) return { totale: 0, meta: 0, conteggio: 0 };
+  if (last < 2) return { totale: 0, meta: 0, conteggio: 0 };
 
-  // Senza colonna split vale ancora il vecchio marcatore "-", che puo' stare in
-  // una qualsiasi colonna a destra della nota: in quel caso il blocco resta largo.
-  var primaC, ultimaC;
-  if (idxSplit >= 0) {
-    primaC = Math.min(idxSpesa, idxSplit);
-    ultimaC = Math.max(idxSpesa, idxSplit);
-  } else {
-    primaC = Math.min(idxSpesa, idxNota + 1);
-    ultimaC = lastCol - 1;
+  var larghezza = Math.min(lastCol, COLONNE_UTILI);
+  var blocco = sheet.getRange(1, 1, last, larghezza).getValues();
+  var h = _intestazioniDaBlocco(blocco, larghezza);
+
+  var idxData  = _colFor(h.headers, ['data']);
+  var idxSpesa = _colFor(h.headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
+  var idxNota  = _colFor(h.headers, ['dettagl', 'nota', 'note', 'descriz']);
+  var idxSplit = _colFor(h.headers, ['split']);
+  if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
+
+  // Fuori dalle prime colonne: si rilegge tutto, com'era prima.
+  if (idxSpesa < 0 || idxNota < 0 || (idxSplit < 0 && larghezza < lastCol)) {
+    if (larghezza < lastCol) {
+      blocco = sheet.getRange(1, 1, last, lastCol).getValues();
+      larghezza = lastCol;
+      h = _intestazioniDaBlocco(blocco, larghezza);
+      idxData  = _colFor(h.headers, ['data']);
+      idxSpesa = _colFor(h.headers, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']);
+      idxNota  = _colFor(h.headers, ['dettagl', 'nota', 'note', 'descriz']);
+      idxSplit = _colFor(h.headers, ['split']);
+      if (idxSpesa < 0 && idxData >= 0) idxSpesa = idxData + 1;
+    }
+    if (idxSpesa < 0 || idxNota < 0) return { totale: 0, meta: 0, conteggio: 0 };
   }
 
-  var vals = sheet.getRange(firstData, primaC + 1, last - firstData + 1, ultimaC - primaC + 1)
-    .getValues();
-  var cSpesa = idxSpesa - primaC;
-  var cSplit = idxSplit >= 0 ? idxSplit - primaC : -1;
-  var cNota = idxNota - primaC;
-  var larghezza = ultimaC - primaC + 1;
-
   var tot = 0, cnt = 0;
-  for (var i = 0; i < vals.length; i++) {
-    var row = vals[i];
-    if (!_isCondivisa(row, cSplit, cNota, larghezza)) continue;
-    var v = row[cSpesa];
+  for (var i = h.row; i < blocco.length; i++) {   // h.row e' 1-based: parte dopo
+    var row = blocco[i];
+    if (!_isCondivisa(row, idxSplit, idxNota, larghezza)) continue;
+    var v = row[idxSpesa];
     var n = (typeof v === 'number')
       ? v
       : parseFloat(String(v).replace(/[^0-9,.\-]/g, '').replace(',', '.'));
     if (!isNaN(n)) { tot += Math.abs(n); cnt++; }
   }
   return { totale: tot, meta: tot / 2, conteggio: cnt };
+}
+
+// Stessa logica di _findHeader, ma su righe gia' in memoria invece che con una
+// lettura dedicata.
+function _intestazioniDaBlocco(blocco, larghezza) {
+  var kw = ['data', 'categor', 'dettagl', 'importo', 'spesa', 'euro',
+            'costo', '€', 'chf', 'franc', 'note', 'nota', 'descriz'];
+  var quante = Math.min(blocco.length, 8);
+  var best = -1, bestRow = 1;
+  var bestHeaders = blocco[0].map(function (x) { return String(x).toLowerCase().trim(); });
+  for (var r = 0; r < quante; r++) {
+    var riga = blocco[r].map(function (x) { return String(x).toLowerCase().trim(); });
+    var punti = 0;
+    riga.forEach(function (cella) {
+      if (!cella) return;
+      kw.forEach(function (k) { if (cella.indexOf(k) !== -1) punti++; });
+    });
+    if (punti > best) { best = punti; bestRow = r + 1; bestHeaders = riga; }
+  }
+  return { row: bestRow, headers: bestHeaders, lastCol: larghezza };
 }
 
 // SOLO LETTURA: elenca una per una le righe considerate condivise, con il
