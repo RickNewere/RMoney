@@ -71,7 +71,6 @@
     /* Marker next to the title: says whether the figure on screen is being
        refreshed or is stale, without ever blanking the figure itself. */
     .debtStato { font-size:11px; font-weight:600; color:var(--muted); margin-left:8px; }
-    .debtStato.vecchio { color:var(--err, #c0392b); cursor:pointer; }
     .saldaBtn { width:100%; margin-top:14px; padding:11px; border-radius:12px; border:1px solid var(--border); background:transparent; color:var(--muted); font-size:14px; font-weight:700; }
     .saldaBtn:disabled { opacity:.5; }
     .saldaMsg { text-align:center; margin-top:8px; font-size:13px; font-weight:600; min-height:16px; }
@@ -661,7 +660,6 @@
     // (aggiornaDebitoLocale), che e' la stessa aritmetica che fa il foglio. La
     // lettura che arriva dopo lo conferma, e se mai fosse diversa vince lei.
     var debitoInCorso = false;      // c'e' una lettura in volo
-    var debitoNonAggiornato = false; // l'ultima lettura e' fallita, il numero resta
     var debitoRitentativo = 0;       // quale ritentativo e' in corso, 0 = il primo giro
     var CHIAVI_META = ['totale', 'meta', 'conteggio'];
 
@@ -669,7 +667,7 @@
     // Non e' una stima: e' l'importo che abbiamo appena mandato noi, sul foglio
     // che abbiamo scelto noi, e il foglio ne fara' la meta' esattamente come qui.
     function aggiornaDebitoLocale(gidScritto, importo) {
-      if (!fogliDebito || fogliDebito === 'errore') return;
+      if (!fogliDebito) return;
       var v = Math.abs(parseFloat(String(importo).replace(',', '.')));
       if (!isFinite(v) || v === 0) return;
       var f = fogliDebito[gidScritto];
@@ -706,24 +704,20 @@
       // mostrare, cioe' alla prima apertura. Se un numero c'e' gia' non si
       // cancella per rileggerlo: si lascia a schermo e si dice di fianco al
       // titolo che sta arrivando quello nuovo.
-      if (!fogliDebito || fogliDebito === 'errore') {
+      // Card fredda: nessun numero ancora. Niente "non caricato": o sta
+      // arrivando, o manca la rete, che e' un fatto del telefono e si risolve
+      // da solo. In nessuno dei due casi c'e' qualcosa di rotto da segnalare.
+      if (!fogliDebito) {
         saldaBtn.disabled = true;
-        // Una lettura in corso vince sull'errore precedente, altrimenti toccare
-        // la card per riprovare non cambia niente a schermo e sembra rotta.
-        if (debitoInCorso) {
+        if (debitoSospeso && navigator.onLine === false) {
+          foglioVal.textContent = 'senza rete'; foglioVal.className = 'debtVal zero';
+          netVal.textContent = ''; netVal.className = 'debtVal';
+          stato.textContent = 'riprovo appena torna'; stato.className = 'debtStato';
+        } else {
+          foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
+          netVal.textContent = '…'; netVal.className = 'debtVal';
           stato.textContent = debitoRitentativo ? 'ci mette più del solito, riprovo…' : '';
           stato.className = 'debtStato';
-          foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
-          netVal.textContent = '…'; netVal.className = 'debtVal';
-        } else if (fogliDebito === 'errore') {
-          stato.textContent = ''; stato.className = 'debtStato';
-          foglioVal.textContent = 'non caricato, tocca qui';
-          foglioVal.className = 'debtVal zero';
-          netVal.textContent = '';
-        } else {
-          stato.textContent = ''; stato.className = 'debtStato';
-          foglioVal.textContent = '…'; foglioVal.className = 'debtVal';
-          netVal.textContent = '…'; netVal.className = 'debtVal';
         }
         return;
       }
@@ -733,17 +727,17 @@
 
       // Il "saldato" azzera spunte in modo irreversibile alla cieca se il numero
       // sotto gli occhi non e' quello del foglio: si blocca finche' non lo e'.
-      saldaBtn.disabled = debitoInCorso || debitoNonAggiornato;
-      if (debitoInCorso) {
+      saldaBtn.disabled = debitoInCorso;
+      if (debitoSospeso && navigator.onLine === false) {
+        stato.textContent = 'senza rete, riprovo appena torna';
+      } else if (debitoRitentativo) {
+        stato.textContent = 'ci mette più del solito, riprovo…';
+      } else if (debitoInCorso) {
         stato.textContent = 'aggiorno…';
-        stato.className = 'debtStato';
-      } else if (debitoNonAggiornato) {
-        stato.textContent = 'non aggiornato, tocca qui';
-        stato.className = 'debtStato vecchio';
       } else {
         stato.textContent = '';
-        stato.className = 'debtStato';
       }
+      stato.className = 'debtStato';
 
       // Meta condivisa di questo foglio (quanto l'altra persona deve).
       if (mio.meta > 0.005) {
@@ -777,7 +771,19 @@
     // quel caso si ripiega sulle due letture per valuta, che esistono da
     // sempre. Senza questo la card resterebbe su "non caricato" fino al deploy.
     //
-    // TRE tentativi. Qui c'era scritto "UN SOLO tentativo, niente ritentativi",
+    // NON esiste uno stato di errore per il debito. Si riprova finche' non
+    // risponde, e basta. Prima i tentativi erano uno, poi tre, e in entrambi i
+    // casi finito il conto la card diceva "non caricato": un errore che non
+    // descrive niente di rotto, perche' la lettura dopo funziona quasi sempre.
+    // Misurato mentre il backend era in giornata storta: tre letture singole su
+    // quattro fallite (16,3 s, 21,4 s e 50,6 s, tutte con una pagina HTML al
+    // posto del JSON) e la quarta riuscita in 3,1 s. Con numeri cosi' nessun
+    // numero fisso di tentativi tiene, mentre riprovare a oltranza arriva sempre
+    // in fondo. Il costo e' che ogni tanto ci vuole piu' tempo, non che compare
+    // un errore. I tempi di attesa crescono (2, 5, 10, 20, poi 30 secondi) cosi'
+    // un backend in difficolta' non viene martellato.
+    //
+    // Qui c'era scritto "UN SOLO tentativo, niente ritentativi",
     // e il motivo era che interrompere una fetch non ferma l'esecuzione su Apps
     // Script: la lettura abbandonata continuava a girare e il ritentativo si
     // aggiungeva, e in quel minuto una spesa scritta restava in fila dietro.
@@ -803,9 +809,8 @@
     // costa 1,0-2,5 s, quindi leggere i quattro fogli pesa 0,3-2,6 s in tutto.
     // E' Apps Script che ci mette mezzo minuto a partire, esattamente come sulle
     // scritture lente. Non si accorcia dal client: si riprova.
-    var TENTATIVI_DEBITO = 3;
     var TETTO_DEBITO_MS = 45000; // generoso: a freddo l'avvio da solo prende 27 s
-    var PAUSE_DEBITO_MS = [2000, 5000];
+    var PAUSE_DEBITO_MS = [2000, 5000, 10000, 20000, 30000]; // poi resta a 30 s
 
     function leggiDebitiUnaVolta() {
       var ctrl = window.AbortController ? new AbortController() : null;
@@ -822,21 +827,48 @@
         .catch(function (e) { clearTimeout(scaduto); throw e; });
     }
 
-    // "ancoraValida" fa smettere la catena se nel frattempo e' partita una
-    // lettura piu' recente, altrimenti i ritentativi di quella vecchia
-    // continuerebbero a girare a vuoto per un minuto e mezzo.
-    // "onRitento" serve solo a dire all'utente che ci sta mettendo tanto.
-    function leggiTuttiIDebiti(ancoraValida, onRitento, tentativo) {
-      tentativo = tentativo || 0;
-      return leggiDebitiUnaVolta().catch(function (e) {
-        if (ancoraValida && !ancoraValida()) throw e;
-        if (tentativo + 1 >= TENTATIVI_DEBITO) throw e;
-        if (onRitento) onRitento(tentativo + 1);
-        var pausa = PAUSE_DEBITO_MS[tentativo] || 5000;
-        return new Promise(function (ok) { setTimeout(ok, pausa); })
-          .then(function () {
-            return leggiTuttiIDebiti(ancoraValida, onRitento, tentativo + 1);
-          });
+    // Timer del prossimo tentativo, per poterlo annullare quando ne parte una
+    // piu' recente o quando l'utente tocca la card per non aspettare la pausa.
+    var debitoAttesa = null;
+    // Vero quando si e' smesso di riprovare in attesa di una condizione esterna
+    // (pagina in secondo piano, telefono senza rete). Non e' un errore: si
+    // riparte da soli appena la condizione cambia.
+    var debitoSospeso = false;
+
+    function annullaAttesaDebito() {
+      if (debitoAttesa) { clearTimeout(debitoAttesa); debitoAttesa = null; }
+    }
+
+    // Un tentativo, e in caso di buca il successivo. Non finisce mai in errore:
+    // o riesce, o si sospende aspettando rete o primo piano.
+    function provaDebito(mio, ritardoMs) {
+      return new Promise(function (ok) {
+        if (!ritardoMs) { ok(); return; }
+        debitoAttesa = setTimeout(function () { debitoAttesa = null; ok(); }, ritardoMs);
+      }).then(function () {
+        if (mio !== debitoReq) return;
+        return leggiDebitiUnaVolta().then(function (fogli) {
+          if (mio !== debitoReq) return;
+          debitoInCorso = false;
+          debitoSospeso = false;
+          debitoRitentativo = 0;
+          fogliDebito = fogli; // il foglio ha sempre ragione sul conto locale
+          mostraDebito();
+        }, function () {
+          if (mio !== debitoReq) return;
+          debitoRitentativo++;
+          // Senza rete non ha senso insistere: consuma batteria e non puo'
+          // riuscire. Si riparte dall'evento "online".
+          // Con la pagina in secondo piano nemmeno: nessuno la sta guardando.
+          if ((navigator.onLine === false) || document.visibilityState === 'hidden') {
+            debitoSospeso = true;
+            mostraDebito();
+            return;
+          }
+          mostraDebito();
+          var i = Math.min(debitoRitentativo - 1, PAUSE_DEBITO_MS.length - 1);
+          return provaDebito(mio, PAUSE_DEBITO_MS[i]);
+        });
       });
     }
 
@@ -888,47 +920,24 @@
       // Il numero che c'e' resta dov'e'. Azzerarlo qui era il motivo per cui la
       // card spariva a ogni salvataggio di una spesa condivisa.
       debitoInCorso = true;
-      debitoNonAggiornato = false;
+      debitoSospeso = false;
       debitoRitentativo = 0;
+      annullaAttesaDebito();
       document.getElementById('saldaMsg').textContent = '';
       mostraDebito();
-      var attesa = ritardoMs
-        ? new Promise(function (ok) { setTimeout(ok, ritardoMs); })
-        : Promise.resolve();
-      return attesa
-        .then(function () {
-          if (mio !== debitoReq) return null;
-          return leggiTuttiIDebiti(
-            function () { return mio === debitoReq; },
-            function (n) {
-              if (mio !== debitoReq) return;
-              // Su una card fredda non c'e' nessun numero da guardare, quindi
-              // conviene dire perche' i puntini sono ancora li'.
-              debitoRitentativo = n;
-              mostraDebito();
-            }
-          );
-        })
-        .then(function (fogli) {
-          if (mio !== debitoReq) return; // superata da una lettura piu' recente
-          debitoInCorso = false;
-          fogliDebito = fogli; // il foglio ha sempre ragione sul conto locale
-          mostraDebito();
-        })
-        .catch(function () {
-          if (mio !== debitoReq) return;
-          debitoInCorso = false;
-          debitoRitentativo = 0;
-          // Senza nessun numero si dice che non si sa: su questo numero si
-          // decide chi paga, e uno sbagliato e' peggio di nessuno. Con un numero
-          // gia' a schermo lo si tiene, marcato "non aggiornato" e cliccabile:
-          // e' della stessa sessione ed e' aritmeticamente corretto, mentre
-          // cancellarlo per una lettura andata storta non informa nessuno.
-          if (fogliDebito && fogliDebito !== 'errore') debitoNonAggiornato = true;
-          else fogliDebito = 'errore';
-          mostraDebito();
-        });
+      // Nessun ramo di fallimento: provaDebito o riesce o si sospende in attesa
+      // di rete o di primo piano, e riparte da solo.
+      return provaDebito(mio, ritardoMs || 0);
     }
+
+    // Riprende dopo una sospensione: si torna sull'app, oppure torna la rete.
+    function riprendiDebito() {
+      if (debitoSospeso) caricaDebito();
+    }
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') riprendiDebito();
+    });
+    window.addEventListener('online', riprendiDebito);
 
     // Qui c'era una cache del debito in localStorage, una per ognuna delle
     // quattro combinazioni persona/conto, piu' un precaricamento in sottofondo
@@ -963,19 +972,13 @@
     // "tocca qui" su due parole in grigio e' un bersaglio da pochi millimetri.
     // Il pulsante "Saldato" e' escluso, altrimenti premerlo farebbe anche
     // ripartire una lettura.
+    // Toccare non e' piu' necessario, perche' non si smette mai di riprovare:
+    // serve solo a saltare la pausa fra un tentativo e il successivo, che a fine
+    // scala e' di trenta secondi. Se una lettura e' davvero in volo non si fa
+    // niente, altrimenti si buttano via i venti secondi gia' aspettati.
     document.getElementById('debt').addEventListener('click', function (ev) {
       if (ev.target.closest('#saldaBtn')) return;
-      if (debitoInCorso) return;
-      if (fogliDebito === 'errore' || debitoNonAggiornato) caricaDebito();
-    });
-
-    // Riprova da sola quando si torna sull'app. Il caso tipico e' proprio
-    // questo: si apre, Apps Script ci mette mezzo minuto a partire, si guarda
-    // altro e si torna. Senza questo bisogna sapere che la card va toccata.
-    document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState !== 'visible') return;
-      if (debitoInCorso) return;
-      if (fogliDebito === 'errore' || debitoNonAggiornato) caricaDebito();
+      if (debitoAttesa || debitoSospeso) caricaDebito();
     });
 
     caricaDebito();
