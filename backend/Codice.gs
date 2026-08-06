@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v34';
+var VERSION = 'v35';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -265,10 +265,19 @@ function _oauthChiama(payload) {
   try { j = JSON.parse(r.getContentText()); }
   catch (e) { throw new Error('Risposta di Google illeggibile'); }
   if (r.getResponseCode() >= 400) {
-    // Il messaggio di Google va riportato tale e quale: "redirect_uri_mismatch"
-    // o "invalid_grant" dicono esattamente cosa sistemare, un generico
-    // "errore di autorizzazione" no.
-    throw new Error(j.error_description || j.error || ('HTTP ' + r.getResponseCode()));
+    // Servono ENTRAMBI i campi, e il codice va per primo.
+    //
+    // Su un gettone di rinnovo non piu' valido Google risponde
+    // {error:"invalid_grant", error_description:"Bad Request"}. La prima
+    // versione prendeva solo la descrizione, quindi al client arrivava
+    // "Bad Request", che non dice niente: il client riconosce un consenso
+    // revocato (gettone da buttare, accesso da rifare) e lo distingue da un
+    // inciampo passeggero (si riprova) proprio guardando "invalid_grant".
+    // Visto sul serio chiamando il custode con un gettone finto.
+    var codice = j.error || '';
+    var descr = j.error_description || '';
+    throw new Error((codice && descr) ? (codice + ': ' + descr)
+                  : (codice || descr || ('HTTP ' + r.getResponseCode())));
   }
   return j;
 }
