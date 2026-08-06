@@ -486,14 +486,32 @@
 
     // Si rinnova PRIMA che scada, cinque minuti avanti, cosi' non capita mai
     // che un salvataggio trovi il permesso morto e debba ripiegare.
+    // E si insiste finche' non riesce. Il rinnovo passa da Apps Script, che e'
+    // il custode della chiave, quindi si porta dietro la sua inaffidabilita':
+    // misurato, un rinnovo e' tornato dopo 22,7 secondi con una pagina HTML al
+    // posto dei dati. La prima versione a quel punto si arrendeva in silenzio e
+    // il permesso sarebbe scaduto lo stesso: tutto il lavoro per l'accesso
+    // permanente buttato da un singolo inciampo. I cinque minuti di margine
+    // servono esattamente a dare spazio a questi ritentativi.
     var timerRinnovo = null;
+    var attesaRinnovo = 0;
+
     function programmaRinnovo() {
       if (timerRinnovo) clearTimeout(timerRinnovo);
       if (!gettoneRinnovo()) return;
-      var fra = Math.max(30000, tokenScade - Date.now() - 300000);
-      timerRinnovo = setTimeout(function () {
-        rinnovaToken().catch(function () { /* riprova il prossimo giro */ });
-      }, fra);
+      attesaRinnovo = 0;
+      timerRinnovo = setTimeout(tentaRinnovo, Math.max(30000, tokenScade - Date.now() - 300000));
+    }
+
+    function tentaRinnovo() {
+      rinnovaToken().catch(function () {
+        // Gettone sparito: il consenso e' stato revocato, rinnovaToken ha gia'
+        // pulito e rimesso il pulsante. Insistere non ha alcun senso.
+        if (!gettoneRinnovo()) return;
+        attesaRinnovo = Math.min(attesaRinnovo ? attesaRinnovo * 2 : 20000, 300000);
+        if (timerRinnovo) clearTimeout(timerRinnovo);
+        timerRinnovo = setTimeout(tentaRinnovo, attesaRinnovo);
+      });
     }
 
     // ---------- Chiamate all'API di Sheets ----------
@@ -1572,7 +1590,7 @@
       mostraStatoGoogle();
       if (!gettoneRinnovo()) return;
       if (tokenValido()) { programmaRinnovo(); return; }
-      rinnovaToken().catch(function () { mostraStatoGoogle(); });
+      tentaRinnovo();
     })();
 
     // Il permesso dura un'ora: quando scade la riga lo dice da sola, senza che
@@ -1743,7 +1761,7 @@
       // riesce, se ne avvantaggia il salvataggio dopo.
       var pronto = Promise.resolve(tokenValido());
       if (!tokenValido() && gettoneRinnovo()) {
-        rinnovaToken().catch(function () { /* pazienza, riprova dopo */ });
+        tentaRinnovo(); // in sottofondo: questo salvataggio non lo aspetta
       }
 
       pronto.then(function (collegato) {
