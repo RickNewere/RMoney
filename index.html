@@ -352,6 +352,33 @@
     var tokenScade = 0;
     var clientToken = null;
     var CHIAVE_COLLEGATO = 'rmoney_google_collegato';
+    var CHIAVE_TOKEN = 'rmoney_google_token';
+
+    // Il permesso dura un'ora, ma prima si perdeva a ogni riapertura della
+    // pagina, e la web app sull'iPhone si ricarica di continuo: in pratica
+    // dell'ora se ne usavano pochi minuti, e tutto il resto tornava su Apps
+    // Script. Conservandolo, l'ora si usa tutta.
+    //
+    // E' un gettone di accesso, quindi va detto cosa si sta conservando: vale
+    // solo per i fogli di calcolo di chi lo ha rilasciato, scade da solo in
+    // un'ora e resta nel telefono, leggibile solo da questa stessa pagina.
+    // Non e' una password e non permette di rientrare nell'account.
+    function salvaToken() {
+      try {
+        localStorage.setItem(CHIAVE_TOKEN, JSON.stringify({ t: tokenGoogle, s: tokenScade }));
+      } catch (e) { /* modalita' privata: pazienza, si ricollega */ }
+    }
+    function scartaToken() {
+      tokenGoogle = ''; tokenScade = 0;
+      try { localStorage.removeItem(CHIAVE_TOKEN); } catch (e) { /* pazienza */ }
+    }
+    (function riprendiToken() {
+      try {
+        var g = JSON.parse(localStorage.getItem(CHIAVE_TOKEN) || 'null');
+        if (g && g.t && g.s > Date.now()) { tokenGoogle = g.t; tokenScade = g.s; }
+        else if (g) { localStorage.removeItem(CHIAVE_TOKEN); }
+      } catch (e) { /* niente da riprendere */ }
+    })();
 
     function googleCaricato() {
       return !!(window.google && google.accounts && google.accounts.oauth2);
@@ -376,6 +403,7 @@
             // una richiesta lunga non parte con un token che scade a meta'.
             tokenScade = Date.now() + (Number(r.expires_in || 3600) - 60) * 1000;
             try { localStorage.setItem(CHIAVE_COLLEGATO, '1'); } catch (e) { /* privata */ }
+            salvaToken();
             ok(tokenGoogle);
           } else {
             no(new Error((r && r.error) || 'accesso negato'));
@@ -706,7 +734,7 @@
         // questo ogni salvataggio successivo ritenterebbe la stessa strada
         // chiusa, pagando l'attesa ogni volta.
         if (e.stato === 401 || e.stato === 403) {
-          tokenGoogle = ''; tokenScade = 0;
+          scartaToken();
           if (typeof mostraStatoGoogle === 'function') mostraStatoGoogle();
         }
         throw e;
@@ -1615,7 +1643,30 @@
       // Si prova solo con un permesso valido in mano; in tutti gli altri casi
       // si va da Apps Script senza dire niente all'utente, perche' per lui non
       // cambia nulla se non il tempo di attesa.
-      if (tokenValido()) {
+      // Il permesso Google dura un'ora, e finora quando scadeva il salvataggio
+      // ripiegava su Apps Script. Con Apps Script in giornata storta questo
+      // significa aspettare mezzo minuto e, se anche la verifica non risponde,
+      // leggersi "Non riesco a verificare" su una spesa mai scritta.
+      //
+      // Il tocco su Aggiungi e' un gesto dell'utente, ed e' l'UNICO momento in
+      // cui il browser lascia a Google la possibilita' di rinnovare il permesso
+      // senza essere bloccato come finestra indesiderata. Quindi si rinnova
+      // qui. Con il consenso gia' dato, di norma torna senza mostrare niente.
+      //
+      // MISURATO, e non funziona: anche partendo da un tocco, Google vuole
+      // comunque aprire una finestra e la promessa non si chiude mai. Un primo
+      // tentativo aspettava fino a 4 secondi prima di arrendersi, e quei 4
+      // secondi finivano tutti nell'attesa dell'utente, sopra ad Apps Script
+      // che e' gia' lento. Quindi il rinnovo NON blocca piu' niente: parte in
+      // sottofondo e questo salvataggio va subito da Apps Script. Se il rinnovo
+      // riesce, se ne avvantaggia il salvataggio dopo.
+      var pronto = Promise.resolve(tokenValido());
+      if (!tokenValido() && haGiaCollegato() && googleCaricato()) {
+        chiediToken(false).then(mostraStatoGoogle, function () { /* pazienza */ });
+      }
+
+      pronto.then(function (collegato) {
+        if (!collegato) { viaAppsScript(); return; }
         scriviDiretto(dati)
           .then(function (r) {
             clearTimeout(lenta);
@@ -1667,9 +1718,7 @@
               viaAppsScript();
             });
           });
-        return;
-      }
-      viaAppsScript();
+      });
       return;
 
       function viaAppsScript() {
