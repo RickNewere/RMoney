@@ -31,7 +31,7 @@ var LOG_GIDS = {
 };
 
 // Marcatore di versione: serve per verificare cosa e' effettivamente online.
-var VERSION = 'v33';
+var VERSION = 'v34';
 
 // Prima riga che l'app puo' riordinare per data, per ogni foglio LOG.
 // Fissata il 27/07/2026 all'ultima riga allora presente + 1: tutto cio' che
@@ -193,6 +193,15 @@ function doPost(e) {
     if (body.op === 'elimina') {
       return _json(svuotaRiga(parseInt(body.gid, 10), parseInt(body.riga, 10), body.atteso));
     }
+    // Custode della chiave OAuth. Arrivano per POST e non per GET apposta: un
+    // codice di autorizzazione o un gettone di rinnovo dentro un indirizzo
+    // finirebbe nella cronologia e nei log di mezza internet.
+    if (body.op === 'oauthScambia') {
+      return _json(scambiaCodice(body.codice));
+    }
+    if (body.op === 'oauthRinnova') {
+      return _json(rinnovaAccesso(body.rinnovo));
+    }
     var esito = aggiungiSpesa(body);
 
     // Lo scarico delle scritture sul foglio va MISURATO, non subito.
@@ -219,6 +228,86 @@ function doPost(e) {
   } catch (err) {
     return _json({ ok: false, error: String((err && err.message) || err) });
   }
+}
+
+// ---------- Custode della chiave OAuth ----------
+//
+// Serve a una cosa sola: la pagina non puo' contenere la chiave segreta del
+// client OAuth, perche' index.html sta in un repo pubblico. Qui invece sta al
+// riparo nelle Proprieta' script.
+//
+// Non conserva NIENTE: ne' codici, ne' gettoni, ne' chi ha chiamato. Il gettone
+// di rinnovo resta nel telefono di chi ha fatto l'accesso.
+//
+// E' per questo che questi due endpoint possono stare su un indirizzo pubblico.
+// La versione piu' comoda, in cui era Apps Script a conservare il gettone di
+// rinnovo, e' stata scartata apposta: avrebbe trasformato l'URL /exec in una
+// porta che consegna a chiunque un accesso a TUTTI i fogli del proprietario.
+// Cosi' invece chi chiama senza avere gia' il gettone non ottiene niente.
+// Non rimettere qui dentro nessun archivio di gettoni.
+var OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+
+function _oauthConf() {
+  var p = PropertiesService.getScriptProperties();
+  var id = p.getProperty('OAUTH_CLIENT_ID');
+  var seg = p.getProperty('OAUTH_CLIENT_SECRET');
+  if (!id || !seg) {
+    throw new Error('Chiave OAuth mancante: vedi Impostazioni progetto, Proprieta script.');
+  }
+  return { id: id, seg: seg };
+}
+
+function _oauthChiama(payload) {
+  var r = UrlFetchApp.fetch(OAUTH_TOKEN_URL, {
+    method: 'post', payload: payload, muteHttpExceptions: true
+  });
+  var j;
+  try { j = JSON.parse(r.getContentText()); }
+  catch (e) { throw new Error('Risposta di Google illeggibile'); }
+  if (r.getResponseCode() >= 400) {
+    // Il messaggio di Google va riportato tale e quale: "redirect_uri_mismatch"
+    // o "invalid_grant" dicono esattamente cosa sistemare, un generico
+    // "errore di autorizzazione" no.
+    throw new Error(j.error_description || j.error || ('HTTP ' + r.getResponseCode()));
+  }
+  return j;
+}
+
+// Primo accesso: codice di autorizzazione -> accesso + gettone di rinnovo.
+// Il gettone di rinnovo arriva UNA VOLTA SOLA, al primo consenso. Se il client
+// lo perde, l'utente deve ridare il consenso da capo.
+function scambiaCodice(codice) {
+  if (!codice) throw new Error('Codice mancante');
+  var c = _oauthConf();
+  var j = _oauthChiama({
+    code: codice,
+    client_id: c.id,
+    client_secret: c.seg,
+    // In modalita' popup il codice torna alla pagina via postMessage, non con
+    // un rimando a un indirizzo: Google vuole questo valore letterale.
+    redirect_uri: 'postmessage',
+    grant_type: 'authorization_code'
+  });
+  return {
+    ok: true,
+    accesso: j.access_token,
+    rinnovo: j.refresh_token || '',
+    durata: j.expires_in || 3600
+  };
+}
+
+// Ogni ora: gettone di rinnovo -> accesso nuovo. Il gettone di rinnovo non
+// scade e non torna nella risposta: quello che ha il client resta valido.
+function rinnovaAccesso(rinnovo) {
+  if (!rinnovo) throw new Error('Gettone di rinnovo mancante');
+  var c = _oauthConf();
+  var j = _oauthChiama({
+    refresh_token: rinnovo,
+    client_id: c.id,
+    client_secret: c.seg,
+    grant_type: 'refresh_token'
+  });
+  return { ok: true, accesso: j.access_token, durata: j.expires_in || 3600 };
 }
 
 function _json(obj) {
