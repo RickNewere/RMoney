@@ -1727,6 +1727,27 @@
         scritturaInCorso = false;
       }
 
+      // Ripulisce il modulo dopo un salvataggio riuscito.
+      //
+      // Sta QUI, nello stesso posto di andataBene e non dentro viaAppsScript.
+      // Ci era finita dentro creando quella funzione, e siccome una funzione
+      // dichiarata dentro un'altra e' invisibile da fuori, la strada diretta
+      // andava a buon fine e poi moriva chiamandola: su Safari
+      // "can't find the variable: riuscita", mostrato come
+      // "Scrittura diretta non riuscita". La riga era gia' sul foglio.
+      // node --check non vede errori del genere, e nemmeno provare
+      // scriviDiretto da sola: si vedono solo premendo il pulsante vero.
+      function riuscita(testo) {
+        msg.className = 'ok'; msg.textContent = testo;
+        document.getElementById('spesa').value = '';
+        document.getElementById('nota').value = '';
+        segno = false;
+        document.getElementById('checkBox').classList.remove('on');
+        document.getElementById('checkBox').textContent = '';
+        // Il debito NON si azzera qui. Ci pensa il suo percorso, che parte
+        // dopo e per conto suo; il numero resta a schermo nel frattempo.
+      }
+
       // Cosa fare quando la riga risulta scritta, da qualunque strada arrivi.
       function andataBene(testo) {
         scritturaFinita();
@@ -1821,17 +1842,6 @@
       return;
 
       function viaAppsScript() {
-      function riuscita(testo) {
-        msg.className = 'ok'; msg.textContent = testo;
-        document.getElementById('spesa').value = '';
-        document.getElementById('nota').value = '';
-        segno = false;
-        document.getElementById('checkBox').classList.remove('on');
-        document.getElementById('checkBox').textContent = '';
-        // Il debito NON si azzera qui. Ci pensa il suo percorso, che parte
-        // dopo e per conto suo; il numero resta a schermo nel frattempo.
-      }
-
       apiPostSenzaRitorno(dati)
         .then(function (esito) {
           clearTimeout(lenta);
