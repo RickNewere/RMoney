@@ -570,6 +570,7 @@
       if (!da) return Promise.reject(new Error('foglio senza riga di partenza'));
       var t0 = Date.now();
       var meta;
+      var inviata = false; // la richiesta di scrittura e' gia' partita?
 
       return metaFoglio(gid).then(function (m) {
         meta = m;
@@ -684,6 +685,14 @@
 
         // Sheets applica un batch in modo atomico: o passa tutto, o non cambia
         // niente. E' la garanzia che una riga non finisca scritta a meta'.
+        //
+        // Da qui in poi la richiesta di scrittura E' PARTITA, e questo cambia
+        // tutto per chi gestisce l'errore: se fallisce adesso, la riga potrebbe
+        // essere sul foglio lo stesso (la risposta puo' perdersi dopo che il
+        // foglio e' stato modificato) e va verificata prima di riprovare.
+        // Se invece fallisce prima, niente e' stato toccato e si puo' passare
+        // ad Apps Script senza cerimonie.
+        inviata = true;
         return chiamaSheets(API_SHEETS + FOGLIO_ID + ':batchUpdate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -691,6 +700,16 @@
         }).then(function () {
           return { riga: piano.rigaNuova, ms: Date.now() - t0, richieste: req.length };
         });
+      }).catch(function (e) {
+        e.inviata = inviata;
+        // Permesso mancante o scaduto: il token e' inutile, si butta. Senza
+        // questo ogni salvataggio successivo ritenterebbe la stessa strada
+        // chiusa, pagando l'attesa ogni volta.
+        if (e.stato === 401 || e.stato === 403) {
+          tokenGoogle = ''; tokenScade = 0;
+          if (typeof mostraStatoGoogle === 'function') mostraStatoGoogle();
+        }
+        throw e;
       });
     }
     var TABS = {
@@ -1605,9 +1624,27 @@
           })
           .catch(function (e) {
             clearTimeout(lenta);
-            // MAI riprovare alla cieca: la richiesta di scrittura potrebbe
-            // essere arrivata e la riga essere gia' sul foglio, e passare
-            // subito ad Apps Script la scriverebbe due volte. Prima si guarda.
+            // Se la richiesta di scrittura non e' mai partita, il foglio non e'
+            // stato toccato: non c'e' niente da verificare e si passa subito ad
+            // Apps Script. E' il caso di gran lunga piu' comune (permesso
+            // scaduto, permesso mancante sul foglio, rete caduta durante la
+            // lettura), e prima finiva lo stesso nella verifica: quando anche
+            // quella non rispondeva, l'utente si vedeva "Non riesco a
+            // verificare, guarda il foglio" per una spesa mai scritta. Il
+            // messaggio piu' spaventoso dell'app, sul caso piu' innocuo.
+            if (!e.inviata) {
+              if (window.console) console.log('[RMoney] diretta non partita (' + e.message + '), passo da Apps Script');
+              // Il motivo va scritto dove si vede anche da telefono. Senza,
+              // l'unico modo di sapere perche' la strada veloce non parte e'
+              // collegare il telefono a un computer.
+              var gs = document.getElementById('gStato');
+              if (gs) gs.textContent = 'Scrittura diretta non riuscita: ' + e.message;
+              msg.className = ''; msg.textContent = 'Salvataggio…';
+              viaAppsScript();
+              return;
+            }
+            // Qui invece la scrittura era partita: la riga potrebbe esserci.
+            // MAI riprovare alla cieca, o la si scrive due volte. Prima si guarda.
             msg.className = ''; msg.textContent = 'Verifico sul foglio…';
             verificaSpesaScritta(dati, function (errore, trovata) {
               if (!errore && trovata) {
