@@ -71,6 +71,15 @@
     /* Marker next to the title: says whether the figure on screen is being
        refreshed or is stale, without ever blanking the figure itself. */
     .debtStato { font-size:11px; font-weight:600; color:var(--muted); margin-left:8px; }
+    /* Riga di stato del collegamento Google. Volutamente discreta: e' una cosa
+       che si tocca una volta e poi si dimentica. */
+    .gRiga { display:flex; align-items:center; justify-content:space-between;
+             gap:10px; max-width:480px; margin:0 auto 14px; padding:0 4px; }
+    .gStato { font-size:11px; font-weight:600; color:var(--muted); }
+    .gCollega { font-size:12px; font-weight:700; padding:6px 12px; border-radius:8px;
+                border:1px solid var(--border); background:transparent;
+                color:var(--accent); cursor:pointer; white-space:nowrap; }
+    .gCollega[hidden] { display:none; }
     .saldaBtn { width:100%; margin-top:14px; padding:11px; border-radius:12px; border:1px solid var(--border); background:transparent; color:var(--muted); font-size:14px; font-weight:700; }
     .saldaBtn:disabled { opacity:.5; }
     .saldaMsg { text-align:center; margin-top:8px; font-size:13px; font-weight:600; min-height:16px; }
@@ -160,6 +169,11 @@
     </div>
     <button id="saldaBtn" class="saldaBtn">Segna come saldato</button>
     <div id="saldaMsg" class="saldaMsg"></div>
+  </div>
+
+  <div class="gRiga">
+    <span id="gStato" class="gStato">Salvataggio tramite Apps Script</span>
+    <button id="gCollega" class="gCollega">Collega Google</button>
   </div>
 
   <div class="card">
@@ -291,8 +305,394 @@
   </div><!-- /viewDettaglio -->
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script>
     var API = 'https://script.google.com/macros/s/AKfycbxlKTYNl-u8kozj2Dl3TXocf0-UqnoyXQmske3lcFz8gEI4Q5emX8j2juj_jcqAzMRG8w/exec';
+
+    // ---- Scrittura diretta sul foglio, senza passare da Apps Script ----
+    //
+    // Perche' esiste: una chiamata ad Apps Script paga l'avvio di un'esecuzione
+    // prima che una riga del nostro codice giri. Misurato su un comando che non
+    // apre nemmeno il foglio, tre volte di fila nello stesso minuto: 1,0 s,
+    // 27,6 s, 3,0 s. Quel numero non si accorcia dal client, si evita.
+    // L'API di Sheets non ha esecuzioni da avviare: si parla col foglio.
+    //
+    // L'ID client sta qui in chiaro apposta ed e' cosi' che va usato: e' un
+    // identificativo pubblico, non una password. Cio' che protegge e' la lista
+    // delle origini autorizzate sul progetto Google, che accetta richieste solo
+    // da https://ricknewere.github.io e da localhost:8099. Il "client secret"
+    // che Google mostra alla creazione NON serve a questo tipo di accesso e non
+    // va messo qui: se un giorno finisse in questo file, andrebbe revocato.
+    var CLIENT_ID = '502850989113-r5c4n6ce133m9pdrmpvn0otrh9oo4qsr.apps.googleusercontent.com';
+    var AMBITO_SHEETS = 'https://www.googleapis.com/auth/spreadsheets';
+    var FOGLIO_ID = '10NT_nAkXRX12sEzFdpa6khSnONfjwm-NHGguoDm215U';
+    // Prima riga che l'app puo' riordinare per data, per foglio. E' la copia
+    // esatta di SORT_FROM in backend/Codice.gs e va tenuta identica: se i due
+    // valori divergono, i due percorsi di scrittura ordinano porzioni diverse
+    // dello stesso foglio.
+    //
+    // Questi numeri sono stati fissati il 27/07/2026 all'ultima riga allora
+    // presente piu' uno: tutto quello che c'era prima resta dov'e' per sempre.
+    // NON ricalcolarli e non "semplificarli": abbassarli rimescola lo storico
+    // di due anni di spese, alzarli perde l'ordinamento gia' fatto.
+    var CODA_DA = {
+      113020932: 775,   // LOG RICCARDO
+      1888286288: 565,  // LOG ROBERTA
+      650699013: 105,   // LOG RICCARDO CHF
+      1063479927: 106   // LOG ROBERTA CHF
+    };
+
+    // ---------- Accesso Google ----------
+    // Il permesso dura circa un'ora e non si rinnova da solo in modo davvero
+    // silenzioso: Google puo' voler aprire una finestrella, e un browser la
+    // blocca se non nasce da un tocco dell'utente. Per questo non si insiste
+    // mai: se il token non c'e' o e' scaduto, il salvataggio prende la strada
+    // di Apps Script, che funziona sempre. Nessuno resta senza salvare.
+    var tokenGoogle = '';
+    var tokenScade = 0;
+    var clientToken = null;
+    var CHIAVE_COLLEGATO = 'rmoney_google_collegato';
+
+    function googleCaricato() {
+      return !!(window.google && google.accounts && google.accounts.oauth2);
+    }
+    function tokenValido() { return !!tokenGoogle && Date.now() < tokenScade; }
+    function haGiaCollegato() {
+      try { return localStorage.getItem(CHIAVE_COLLEGATO) === '1'; } catch (e) { return false; }
+    }
+
+    function chiediToken(interattivo) {
+      return new Promise(function (ok, no) {
+        if (!googleCaricato()) { no(new Error('Google non caricato')); return; }
+        if (!clientToken) {
+          clientToken = google.accounts.oauth2.initTokenClient({
+            client_id: CLIENT_ID, scope: AMBITO_SHEETS, callback: function () {}
+          });
+        }
+        clientToken.callback = function (r) {
+          if (r && r.access_token) {
+            tokenGoogle = r.access_token;
+            // expires_in e' in secondi. Si toglie un minuto di margine, cosi'
+            // una richiesta lunga non parte con un token che scade a meta'.
+            tokenScade = Date.now() + (Number(r.expires_in || 3600) - 60) * 1000;
+            try { localStorage.setItem(CHIAVE_COLLEGATO, '1'); } catch (e) { /* privata */ }
+            ok(tokenGoogle);
+          } else {
+            no(new Error((r && r.error) || 'accesso negato'));
+          }
+        };
+        clientToken.error_callback = function (e) {
+          no(new Error((e && e.type) || 'accesso non riuscito'));
+        };
+        clientToken.requestAccessToken({ prompt: interattivo ? 'consent' : '' });
+      });
+    }
+
+    // ---------- Chiamate all'API di Sheets ----------
+    var API_SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets/';
+
+    function chiamaSheets(url, opzioni) {
+      opzioni = opzioni || {};
+      opzioni.headers = opzioni.headers || {};
+      opzioni.headers['Authorization'] = 'Bearer ' + tokenGoogle;
+      return fetch(url, opzioni).then(function (r) {
+        return r.text().then(function (t) {
+          var j = null;
+          try { j = JSON.parse(t); } catch (e) { /* errore non JSON */ }
+          if (!r.ok) {
+            var e2 = new Error((j && j.error && j.error.message) || ('HTTP ' + r.status));
+            e2.stato = r.status;
+            throw e2;
+          }
+          return j;
+        });
+      });
+    }
+
+    // A1 vuole le lettere di colonna, la griglia vuole gli indici: servono
+    // entrambe perche' la lettura e' per intervallo e la scrittura per griglia.
+    function lettereColonna(n) { // 1 -> A
+      var s = '';
+      while (n > 0) { var r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = (n - 1 - r) / 26; }
+      return s;
+    }
+
+    // Titolo e numero di righe fisiche del foglio, per gid. Letti una volta per
+    // sessione: sono le uniche cose che servono e che non cambiano mai.
+    var metaFogli = {};
+    function metaFoglio(gid) {
+      if (metaFogli[gid]) return Promise.resolve(metaFogli[gid]);
+      var url = API_SHEETS + FOGLIO_ID
+        + '?fields=' + encodeURIComponent('sheets(properties(sheetId,title,gridProperties(rowCount,columnCount)))');
+      return chiamaSheets(url).then(function (j) {
+        (j.sheets || []).forEach(function (s) {
+          var p = s.properties || {};
+          var g = p.gridProperties || {};
+          metaFogli[p.sheetId] = {
+            titolo: p.title, righe: g.rowCount || 1000, colonne: g.columnCount || 26
+          };
+        });
+        if (!metaFogli[gid]) throw new Error('foglio ' + gid + ' non trovato');
+        return metaFogli[gid];
+      });
+    }
+
+    // ---------- Algoritmo di inserimento ----------
+    // Copia fedele della meta' in memoria di aggiungiSpesa in Codice.gs. E'
+    // verificata da 38 prove offline, e ogni scostamento da quel file e' una
+    // riga sbagliata su un foglio che due persone usano per dividere i soldi.
+
+    // Numero seriale di Google Sheets per una data yyyy-mm-dd, a mezzogiorno.
+    // Mezzogiorno e non mezzanotte per lo stesso motivo per cui il backend usa
+    // T12:00:00: lascia mezza giornata di margine da entrambe le parti, cosi'
+    // nessun fuso puo' far scivolare il valore al giorno prima o dopo.
+    function serialeData(iso) {
+      var p = String(iso).split('-');
+      return Date.UTC(+p[0], +p[1] - 1, +p[2]) / 86400000 + 25569 + 0.5;
+    }
+
+    function cellaTesto(v) { return (v === undefined || v === null) ? '' : String(v); }
+
+    // Una riga e' vuota se non ha ne' data, ne' importo, ne' categoria, ne'
+    // nota. La colonna della spunta non conta: una casella superstite su una
+    // riga senza spesa e' un residuo, non un dato.
+    function rigaVuota(row, idx) {
+      return [idx.data, idx.spesa, idx.cat, idx.nota].every(function (k) {
+        return k < 0 || cellaTesto(row[k]).trim() === '';
+      });
+    }
+
+    // Letta con UNFORMATTED_VALUE, una data vera e' gia' un numero. Tutto il
+    // resto non e' una data su cui si possa ordinare.
+    function dataRiga(row, idxData) {
+      if (idxData < 0) return null;
+      var v = row[idxData];
+      return (typeof v === 'number' && isFinite(v)) ? v : null;
+    }
+
+    function trovaColonna(intestazioni, possibili) {
+      for (var i = 0; i < intestazioni.length; i++) {
+        for (var j = 0; j < possibili.length; j++) {
+          if (intestazioni[i].indexOf(possibili[j]) !== -1) return i;
+        }
+      }
+      return -1;
+    }
+
+    // Stessa euristica di _findHeader: la riga di intestazione e' quella che
+    // contiene piu' parole note, cercata nelle prime otto.
+    function trovaIntestazioni(blocco, lastCol) {
+      var kw = ['data', 'categor', 'dettagl', 'importo', 'spesa', 'euro',
+                'costo', '€', 'chf', 'franc', 'note', 'nota', 'descriz'];
+      var best = -1, bestRiga = 1, bestInt = [];
+      for (var r = 0; r < blocco.length; r++) {
+        var riga = [];
+        for (var c = 0; c < lastCol; c++) riga.push(cellaTesto(blocco[r][c]).toLowerCase().trim());
+        var punti = 0;
+        riga.forEach(function (cella) {
+          if (!cella) return;
+          kw.forEach(function (k) { if (cella.indexOf(k) !== -1) punti++; });
+        });
+        if (punti > best) { best = punti; bestRiga = r + 1; bestInt = riga; }
+      }
+      return { riga: bestRiga, intestazioni: bestInt };
+    }
+
+    function componiRiga(dati, idx, lastCol) {
+      var riga = new Array(lastCol);
+      for (var i = 0; i < lastCol; i++) riga[i] = '';
+      if (idx.data >= 0) riga[idx.data] = dati.seriale;
+      if (idx.spesa >= 0) riga[idx.spesa] = dati.importo;
+      if (idx.cat >= 0) riga[idx.cat] = dati.categoria || '';
+      if (idx.nota >= 0) riga[idx.nota] = dati.nota || '';
+      if (idx.split >= 0) {
+        riga[idx.split] = !!dati.segno;
+      } else if (dati.segno && idx.nota >= 0) {
+        // Fogli senza colonna split: vale ancora il vecchio marcatore.
+        var cDx = idx.nota + 1;
+        while (riga.length <= cDx) riga.push('');
+        riga[cDx] = '-';
+      }
+      while (riga.length < lastCol) riga.push('');
+      return riga.slice(0, lastCol);
+    }
+
+    function calcolaScrittura(o) {
+      var piene = [], ultimoPieno = -1, i;
+      for (i = 0; i < o.coda.length; i++) {
+        if (rigaVuota(o.coda[i], o.idx)) continue;
+        piene.push(o.coda[i]);
+        ultimoPieno = i;
+      }
+      // La coda e' tenuta in ordine di data, quindi basta la prima con data
+      // maggiore. Le date uguali restano dietro a quelle gia' presenti, cosi'
+      // l'ultima inserita e' l'ultima in basso.
+      var p = piene.length, mia = o.riga[o.idx.data];
+      for (var k = 0; k < piene.length; k++) {
+        var d = dataRiga(piene[k], o.idx.data);
+        if (d !== null && d > mia) { p = k; break; }
+      }
+      piene.splice(p, 0, o.riga);
+      // Prima riga che cambia davvero: se sopra al punto di inserimento c'era
+      // un buco, la compattazione sposta tutto e bisogna partire da li'.
+      // Il confronto e' per riferimento: piene contiene gli array di coda.
+      var inizio = p;
+      for (var q = 0; q < p; q++) { if (piene[q] !== o.coda[q]) { inizio = q; break; } }
+      var ultima = o.da + piene.length - 1;
+      return {
+        inizio: inizio,
+        quante: piene.length - inizio,
+        rigaNuova: o.da + p,
+        ultima: ultima,
+        valori: piene.slice(inizio),
+        primaRigaScritta: o.da + inizio,
+        righeDaAggiungere: ultima > o.righeFisiche ? ultima - o.righeFisiche : 0,
+        nasceRigaNuova: ultima > o.ultimaUsata,
+        avanzo: Math.max(0, ultimoPieno - piene.length + 1)
+      };
+    }
+
+    // ---------- La scrittura vera ----------
+    // Due chiamate in tutto: una legge intestazioni e coda insieme, una scrive
+    // valori, formato e casella insieme. Apps Script ne faceva una sola, ma
+    // pagando ogni volta l'avvio di un'esecuzione, che e' la cosa che costa.
+
+    function cellaDaValore(v) {
+      if (v === '' || v === undefined || v === null) return {}; // svuota
+      if (typeof v === 'number') return { userEnteredValue: { numberValue: v } };
+      if (typeof v === 'boolean') return { userEnteredValue: { boolValue: v } };
+      return { userEnteredValue: { stringValue: String(v) } };
+    }
+
+    function scriviDiretto(dati) {
+      var gid = parseInt(dati.gid, 10);
+      var da = CODA_DA[gid];
+      if (!da) return Promise.reject(new Error('foglio senza riga di partenza'));
+      var t0 = Date.now();
+      var meta;
+
+      return metaFoglio(gid).then(function (m) {
+        meta = m;
+        var ultimaCol = lettereColonna(meta.colonne);
+        var t = "'" + String(meta.titolo).replace(/'/g, "''") + "'";
+        // Un solo giro per le intestazioni (prime 8 righe) e per la coda.
+        // La coda si chiede aperta in fondo: Google restituisce solo le righe
+        // che esistono davvero, e da quante sono si ricava l'ultima occupata.
+        var url = API_SHEETS + FOGLIO_ID + '/values:batchGet'
+          + '?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER'
+          + '&ranges=' + encodeURIComponent(t + '!A1:' + ultimaCol + '8')
+          + '&ranges=' + encodeURIComponent(t + '!A' + da + ':' + ultimaCol);
+        return chiamaSheets(url);
+      }).then(function (j) {
+        var v = j.valueRanges || [];
+        var blocco = (v[0] && v[0].values) || [];
+        var coda = (v[1] && v[1].values) || [];
+        var lastCol = meta.colonne;
+
+        var h = trovaIntestazioni(blocco, lastCol);
+        var idx = {
+          data:  trovaColonna(h.intestazioni, ['data']),
+          spesa: trovaColonna(h.intestazioni, ['€', 'chf', 'importo', 'spesa', 'euro', 'franc', 'costo']),
+          cat:   trovaColonna(h.intestazioni, ['categor']),
+          nota:  trovaColonna(h.intestazioni, ['dettagl', 'nota', 'note', 'descriz']),
+          split: trovaColonna(h.intestazioni, ['split'])
+        };
+        if (idx.spesa < 0 && idx.data >= 0) idx.spesa = idx.data + 1;
+        if (idx.data < 0 || idx.spesa < 0) {
+          throw new Error('intestazioni del foglio non riconosciute');
+        }
+
+        // Google taglia le celle vuote in fondo a ogni riga: senza questo
+        // pareggio, gli indici di colonna scivolerebbero.
+        var i, c;
+        for (i = 0; i < coda.length; i++) {
+          while (coda[i].length < lastCol) coda[i].push('');
+        }
+
+        var importo = parseFloat(String(dati.spesa).replace(',', '.'));
+        if (isNaN(importo)) throw new Error('Importo non valido.');
+        var riga = componiRiga({
+          seriale: serialeData(dati.data), importo: importo,
+          categoria: dati.categoria, nota: dati.nota, segno: dati.segno
+        }, idx, lastCol);
+
+        var piano = calcolaScrittura({
+          coda: coda, riga: riga, idx: idx, da: da,
+          righeFisiche: meta.righe,
+          ultimaUsata: da + coda.length - 1
+        });
+
+        var req = [];
+        // 1. Le righe fisiche devono esistere: scrivere fuori dalla griglia e'
+        //    un errore, non una crescita automatica.
+        if (piano.righeDaAggiungere > 0) {
+          req.push({ appendDimension: {
+            sheetId: gid, dimension: 'ROWS', length: piano.righeDaAggiungere
+          } });
+        }
+        // 2. Formato della riga che nasce ora, copiato dalla PRIMA riga di
+        //    dati e non dall'ultima: se le ultime sono gia' venute male,
+        //    copiare da li' propagherebbe il difetto.
+        if (piano.nasceRigaNuova) {
+          req.push({ copyPaste: {
+            source: { sheetId: gid, startRowIndex: h.riga, endRowIndex: h.riga + 1,
+                      startColumnIndex: 0, endColumnIndex: lastCol },
+            destination: { sheetId: gid, startRowIndex: piano.ultima - 1, endRowIndex: piano.ultima,
+                           startColumnIndex: 0, endColumnIndex: lastCol },
+            pasteType: 'PASTE_FORMAT'
+          } });
+        }
+        // 3. La casella di spunta su tutto l'intervallo riscritto: una riga
+        //    nata ora, o svuotata da una cancellazione, non ha la convalida, e
+        //    senza convalida un true si vedrebbe come la scritta "TRUE".
+        if (idx.split >= 0) {
+          req.push({ setDataValidation: {
+            range: { sheetId: gid,
+              startRowIndex: piano.primaRigaScritta - 1,
+              endRowIndex: piano.primaRigaScritta - 1 + piano.quante,
+              startColumnIndex: idx.split, endColumnIndex: idx.split + 1 },
+            rule: { condition: { type: 'BOOLEAN' }, showCustomUi: true }
+          } });
+        }
+        // 4. I valori. fields limitato al contenuto: il formato delle celle
+        //    gia' esistenti non si tocca.
+        req.push({ updateCells: {
+          range: { sheetId: gid,
+            startRowIndex: piano.primaRigaScritta - 1,
+            endRowIndex: piano.primaRigaScritta - 1 + piano.quante,
+            startColumnIndex: 0, endColumnIndex: lastCol },
+          rows: piano.valori.map(function (r) {
+            return { values: r.map(cellaDaValore) };
+          }),
+          fields: 'userEnteredValue'
+        } });
+        // 5. Se la coda si e' compattata, sotto restano le copie delle righe
+        //    risalite: vanno svuotate, spunta compresa.
+        if (piano.avanzo > 0) {
+          req.push({ updateCells: {
+            range: { sheetId: gid, startRowIndex: piano.ultima, endRowIndex: piano.ultima + piano.avanzo,
+                     startColumnIndex: 0, endColumnIndex: lastCol },
+            fields: 'userEnteredValue'
+          } });
+          if (idx.split >= 0) {
+            req.push({ setDataValidation: {
+              range: { sheetId: gid, startRowIndex: piano.ultima, endRowIndex: piano.ultima + piano.avanzo,
+                       startColumnIndex: idx.split, endColumnIndex: idx.split + 1 }
+            } });
+          }
+        }
+
+        // Sheets applica un batch in modo atomico: o passa tutto, o non cambia
+        // niente. E' la garanzia che una riga non finisca scritta a meta'.
+        return chiamaSheets(API_SHEETS + FOGLIO_ID + ':batchUpdate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requests: req })
+        }).then(function () {
+          return { riga: piano.rigaNuova, ms: Date.now() - t0, richieste: req.length };
+        });
+      });
+    }
     var TABS = {
       Riccardo: { Euro: 113020932, Franchi: 650699013 },
       Roberta:  { Euro: 1888286288, Franchi: 1063479927 }
@@ -995,6 +1395,62 @@
 
     caricaDebito();
 
+    // ---------- Stato del collegamento Google ----------
+    // Due sole cose da dire: da quale strada passa il salvataggio, e se serve
+    // un tocco per ricollegarsi. Mai un errore: senza collegamento l'app
+    // funziona esattamente come prima.
+    function mostraStatoGoogle() {
+      var s = document.getElementById('gStato');
+      var b = document.getElementById('gCollega');
+      if (tokenValido()) {
+        s.textContent = 'Scrittura diretta sul foglio, attiva';
+        b.hidden = true;
+        return;
+      }
+      s.textContent = haGiaCollegato()
+        ? 'Permesso Google scaduto, salvo tramite Apps Script'
+        : 'Salvataggio tramite Apps Script';
+      b.hidden = false;
+      b.textContent = haGiaCollegato() ? 'Ricollega Google' : 'Collega Google';
+      b.disabled = false;
+    }
+
+    document.getElementById('gCollega').addEventListener('click', function () {
+      var b = this;
+      b.disabled = true;
+      document.getElementById('gStato').textContent = 'Collegamento…';
+      // Interattivo: nasce da un tocco, quindi il browser lascia aprire la
+      // finestrella di Google. E' l'unico momento in cui si puo' fare.
+      chiediToken(true)
+        .then(mostraStatoGoogle)
+        .catch(function (e) {
+          document.getElementById('gStato').textContent = 'Non collegato: ' + e.message;
+          b.disabled = false;
+        });
+    });
+
+    // All'apertura si tenta una volta in silenzio, solo se il collegamento era
+    // gia' stato dato. Se Google vuole mostrare qualcosa il tentativo fallisce
+    // e resta il pulsante: nessuna finestrella a sorpresa, nessun errore.
+    (function riprendiGoogle() {
+      if (!haGiaCollegato()) { mostraStatoGoogle(); return; }
+      var tentativi = 0;
+      var attesa = setInterval(function () {
+        if (googleCaricato()) {
+          clearInterval(attesa);
+          chiediToken(false).then(mostraStatoGoogle, mostraStatoGoogle);
+        } else if (++tentativi > 40) { // 8 secondi
+          clearInterval(attesa);
+          mostraStatoGoogle();
+        }
+      }, 200);
+      mostraStatoGoogle();
+    })();
+
+    // Il permesso dura un'ora: quando scade la riga lo dice da sola, senza che
+    // l'utente scopra la cosa nel mezzo di un salvataggio.
+    setInterval(mostraStatoGoogle, 30000);
+
     // Pulsante di annullamento, mostrato solo dopo un azzeramento riuscito.
     // Il backend ricorda quali righe erano spuntate, quindi rimetterle e' una
     // sola chiamata. Resta disponibile finche' non si ricarica la pagina: un
@@ -1124,6 +1580,62 @@
       function scritturaFinita() {
         scritturaInCorso = false;
       }
+
+      // Cosa fare quando la riga risulta scritta, da qualunque strada arrivi.
+      function andataBene(testo) {
+        scritturaFinita();
+        riuscita(testo);
+        btn.disabled = false;
+        if (dati.segno) {
+          aggiornaDebitoLocale(dati.gid, dati.spesa);
+          caricaDebito(ATTESA_RILETTURA_MS);
+        }
+      }
+
+      // Strada diretta: si parla col foglio, senza esecuzioni da avviare.
+      // Si prova solo con un permesso valido in mano; in tutti gli altri casi
+      // si va da Apps Script senza dire niente all'utente, perche' per lui non
+      // cambia nulla se non il tempo di attesa.
+      if (tokenValido()) {
+        scriviDiretto(dati)
+          .then(function (r) {
+            clearTimeout(lenta);
+            andataBene('✓ Spesa aggiunta al foglio!');
+            if (window.console) console.log('[RMoney] scrittura diretta ' + r.ms + 'ms, riga ' + r.riga);
+          })
+          .catch(function (e) {
+            clearTimeout(lenta);
+            // MAI riprovare alla cieca: la richiesta di scrittura potrebbe
+            // essere arrivata e la riga essere gia' sul foglio, e passare
+            // subito ad Apps Script la scriverebbe due volte. Prima si guarda.
+            msg.className = ''; msg.textContent = 'Verifico sul foglio…';
+            verificaSpesaScritta(dati, function (errore, trovata) {
+              if (!errore && trovata) {
+                andataBene('✓ Spesa aggiunta al foglio!');
+                return;
+              }
+              if (errore) {
+                // Non si sa se la riga ci sia: scrivere di nuovo e' il rischio
+                // peggiore dei due, quindi si ferma e lo si dice.
+                scritturaFinita();
+                msg.className = 'err';
+                msg.textContent = 'Non riesco a verificare. Guarda il foglio prima di riprovare, '
+                  + 'per non inserirla due volte.';
+                btn.disabled = false;
+                return;
+              }
+              // La riga non c'e': si riparte pulito dalla strada di sempre.
+              if (window.console) console.log('[RMoney] diretta fallita (' + e.message + '), passo da Apps Script');
+              msg.className = ''; msg.textContent = 'Salvataggio…';
+              viaAppsScript();
+            });
+          });
+        return;
+      }
+      viaAppsScript();
+      return;
+
+      function viaAppsScript() {
       function riuscita(testo) {
         msg.className = 'ok'; msg.textContent = testo;
         document.getElementById('spesa').value = '';
@@ -1209,6 +1721,7 @@
             btn.disabled = false;
           });
         });
+      }
     });
 
     // La spesa appena inviata e' finita sul foglio, si' o no?
