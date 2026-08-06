@@ -350,7 +350,6 @@
     // di Apps Script, che funziona sempre. Nessuno resta senza salvare.
     var tokenGoogle = '';
     var tokenScade = 0;
-    var clientToken = null;
     var CHIAVE_COLLEGATO = 'rmoney_google_collegato';
     var CHIAVE_TOKEN = 'rmoney_google_token';
 
@@ -388,32 +387,113 @@
       try { return localStorage.getItem(CHIAVE_COLLEGATO) === '1'; } catch (e) { return false; }
     }
 
-    function chiediToken(interattivo) {
+    // ---------- L'accesso resta ----------
+    // Il permesso che Google da' a una pagina dura un'ora e non si rinnova da
+    // solo: misurato, anche partendo da un tocco dell'utente il rinnovo
+    // silenzioso vuole aprire una finestra e non si chiude mai. Quindi l'ora
+    // scadeva e si tornava su Apps Script, cioe' sui 27 secondi.
+    //
+    // La soluzione e' l'altro tipo di accesso, quello "offline": Google
+    // consegna, oltre al permesso di un'ora, un GETTONE DI RINNOVO che non
+    // scade. Con quello il telefono si rifa' il permesso da solo, in sottofondo,
+    // per sempre. Accesso una volta e basta.
+    //
+    // Il gettone di rinnovo si ottiene solo scambiando un codice con la chiave
+    // segreta del client, e quella chiave non puo' stare in questa pagina che e'
+    // pubblica: la custodisce Apps Script (v34, op oauthScambia e oauthRinnova).
+    // Il gettone pero' resta QUI, nel telefono, non sul backend: se lo tenesse
+    // il backend, l'indirizzo pubblico dell'app diventerebbe una porta che
+    // consegna a chiunque l'accesso a tutti i fogli del proprietario.
+    var CHIAVE_RINNOVO = 'rmoney_google_rinnovo';
+    var clientCodice = null;
+
+    function gettoneRinnovo() {
+      try { return localStorage.getItem(CHIAVE_RINNOVO) || ''; } catch (e) { return ''; }
+    }
+
+    function accettaAccesso(accesso, durataSec) {
+      tokenGoogle = accesso;
+      // durata in secondi, meno un minuto di margine: una richiesta lunga non
+      // deve partire con un permesso che scade a meta' strada.
+      tokenScade = Date.now() + (Number(durataSec || 3600) - 60) * 1000;
+      try { localStorage.setItem(CHIAVE_COLLEGATO, '1'); } catch (e) { /* privata */ }
+      salvaToken();
+      programmaRinnovo();
+    }
+
+    // Primo accesso, e l'unico momento in cui l'utente vede qualcosa di Google.
+    function collegaGoogle() {
       return new Promise(function (ok, no) {
         if (!googleCaricato()) { no(new Error('Google non caricato')); return; }
-        if (!clientToken) {
-          clientToken = google.accounts.oauth2.initTokenClient({
-            client_id: CLIENT_ID, scope: AMBITO_SHEETS, callback: function () {}
+        if (!clientCodice) {
+          clientCodice = google.accounts.oauth2.initCodeClient({
+            client_id: CLIENT_ID,
+            scope: AMBITO_SHEETS,
+            ux_mode: 'popup',
+            callback: function (r) {
+              if (!r || !r.code) { no(new Error((r && r.error) || 'accesso negato')); return; }
+              // Il codice va al custode della chiave, che lo scambia.
+              apiPost({ op: 'oauthScambia', codice: r.code })
+                .then(function (j) {
+                  if (!j || !j.ok || !j.accesso) {
+                    throw new Error((j && j.error) || 'scambio non riuscito');
+                  }
+                  if (j.rinnovo) {
+                    // Arriva una volta sola, al primo consenso. Se si perde,
+                    // l'utente deve ridare il consenso da capo.
+                    try { localStorage.setItem(CHIAVE_RINNOVO, j.rinnovo); } catch (e) { /* privata */ }
+                  }
+                  accettaAccesso(j.accesso, j.durata);
+                  ok(tokenGoogle);
+                })
+                .catch(no);
+            }
           });
         }
-        clientToken.callback = function (r) {
-          if (r && r.access_token) {
-            tokenGoogle = r.access_token;
-            // expires_in e' in secondi. Si toglie un minuto di margine, cosi'
-            // una richiesta lunga non parte con un token che scade a meta'.
-            tokenScade = Date.now() + (Number(r.expires_in || 3600) - 60) * 1000;
-            try { localStorage.setItem(CHIAVE_COLLEGATO, '1'); } catch (e) { /* privata */ }
-            salvaToken();
-            ok(tokenGoogle);
-          } else {
-            no(new Error((r && r.error) || 'accesso negato'));
-          }
-        };
-        clientToken.error_callback = function (e) {
-          no(new Error((e && e.type) || 'accesso non riuscito'));
-        };
-        clientToken.requestAccessToken({ prompt: interattivo ? 'consent' : '' });
+        clientCodice.requestCode();
       });
+    }
+
+    // Rinnovo: nessuna finestra, nessun tocco. Una chiamata sola, una volta
+    // all'ora, e mai mentre l'utente sta aspettando un salvataggio.
+    var rinnovoInCorso = null;
+    function rinnovaToken() {
+      if (rinnovoInCorso) return rinnovoInCorso;
+      var r = gettoneRinnovo();
+      if (!r) return Promise.reject(new Error('nessun gettone di rinnovo'));
+      rinnovoInCorso = apiPost({ op: 'oauthRinnova', rinnovo: r })
+        .then(function (j) {
+          rinnovoInCorso = null;
+          if (!j || !j.ok || !j.accesso) throw new Error((j && j.error) || 'rinnovo non riuscito');
+          accettaAccesso(j.accesso, j.durata);
+          mostraStatoGoogle();
+          return tokenGoogle;
+        })
+        .catch(function (e) {
+          rinnovoInCorso = null;
+          // invalid_grant: il consenso e' stato revocato dall'account Google.
+          // Il gettone non tornera' mai piu' buono, si butta e si richiede
+          // l'accesso, invece di riprovare all'infinito con qualcosa di morto.
+          if (/invalid_grant|revok/i.test(e.message || '')) {
+            try { localStorage.removeItem(CHIAVE_RINNOVO); } catch (e2) { /* pazienza */ }
+            scartaToken();
+            mostraStatoGoogle();
+          }
+          throw e;
+        });
+      return rinnovoInCorso;
+    }
+
+    // Si rinnova PRIMA che scada, cinque minuti avanti, cosi' non capita mai
+    // che un salvataggio trovi il permesso morto e debba ripiegare.
+    var timerRinnovo = null;
+    function programmaRinnovo() {
+      if (timerRinnovo) clearTimeout(timerRinnovo);
+      if (!gettoneRinnovo()) return;
+      var fra = Math.max(30000, tokenScade - Date.now() - 300000);
+      timerRinnovo = setTimeout(function () {
+        rinnovaToken().catch(function () { /* riprova il prossimo giro */ });
+      }, fra);
     }
 
     // ---------- Chiamate all'API di Sheets ----------
@@ -1454,8 +1534,15 @@
         b.hidden = true;
         return;
       }
+      // Con il gettone di rinnovo in mano non c'e' niente da chiedere
+      // all'utente: il permesso si sta gia' rifacendo da solo.
+      if (gettoneRinnovo()) {
+        s.textContent = 'Rinnovo il permesso…';
+        b.hidden = true;
+        return;
+      }
       s.textContent = haGiaCollegato()
-        ? 'Permesso Google scaduto, salvo tramite Apps Script'
+        ? 'Accesso Google da rifare'
         : 'Salvataggio tramite Apps Script';
       b.hidden = false;
       b.textContent = haGiaCollegato() ? 'Ricollega Google' : 'Collega Google';
@@ -1466,9 +1553,10 @@
       var b = this;
       b.disabled = true;
       document.getElementById('gStato').textContent = 'Collegamento…';
-      // Interattivo: nasce da un tocco, quindi il browser lascia aprire la
-      // finestrella di Google. E' l'unico momento in cui si puo' fare.
-      chiediToken(true)
+      // Nasce da un tocco, quindi il browser lascia aprire la finestra di
+      // Google. E' l'unica volta che serve: da qui in poi ci pensa il gettone
+      // di rinnovo.
+      collegaGoogle()
         .then(mostraStatoGoogle)
         .catch(function (e) {
           document.getElementById('gStato').textContent = 'Non collegato: ' + e.message;
@@ -1476,22 +1564,15 @@
         });
     });
 
-    // All'apertura si tenta una volta in silenzio, solo se il collegamento era
-    // gia' stato dato. Se Google vuole mostrare qualcosa il tentativo fallisce
-    // e resta il pulsante: nessuna finestrella a sorpresa, nessun errore.
+    // All'apertura: se c'e' il gettone di rinnovo e il permesso e' scaduto, lo
+    // si rifa' subito, in sottofondo e senza mostrare niente. E' questo che
+    // rende l'accesso permanente. Se il gettone non c'e' (accesso mai fatto, o
+    // consenso revocato) resta il pulsante.
     (function riprendiGoogle() {
-      if (!haGiaCollegato()) { mostraStatoGoogle(); return; }
-      var tentativi = 0;
-      var attesa = setInterval(function () {
-        if (googleCaricato()) {
-          clearInterval(attesa);
-          chiediToken(false).then(mostraStatoGoogle, mostraStatoGoogle);
-        } else if (++tentativi > 40) { // 8 secondi
-          clearInterval(attesa);
-          mostraStatoGoogle();
-        }
-      }, 200);
       mostraStatoGoogle();
+      if (!gettoneRinnovo()) return;
+      if (tokenValido()) { programmaRinnovo(); return; }
+      rinnovaToken().catch(function () { mostraStatoGoogle(); });
     })();
 
     // Il permesso dura un'ora: quando scade la riga lo dice da sola, senza che
@@ -1661,8 +1742,8 @@
       // sottofondo e questo salvataggio va subito da Apps Script. Se il rinnovo
       // riesce, se ne avvantaggia il salvataggio dopo.
       var pronto = Promise.resolve(tokenValido());
-      if (!tokenValido() && haGiaCollegato() && googleCaricato()) {
-        chiediToken(false).then(mostraStatoGoogle, function () { /* pazienza */ });
+      if (!tokenValido() && gettoneRinnovo()) {
+        rinnovaToken().catch(function () { /* pazienza, riprova dopo */ });
       }
 
       pronto.then(function (collegato) {
