@@ -405,7 +405,6 @@
     // il backend, l'indirizzo pubblico dell'app diventerebbe una porta che
     // consegna a chiunque l'accesso a tutti i fogli del proprietario.
     var CHIAVE_RINNOVO = 'rmoney_google_rinnovo';
-    var clientCodice = null;
 
     function gettoneRinnovo() {
       try { return localStorage.getItem(CHIAVE_RINNOVO) || ''; } catch (e) { return ''; }
@@ -425,13 +424,38 @@
     function collegaGoogle() {
       return new Promise(function (ok, no) {
         if (!googleCaricato()) { no(new Error('Google non caricato')); return; }
-        if (!clientCodice) {
-          clientCodice = google.accounts.oauth2.initCodeClient({
+
+        // Rete di sicurezza, e serve davvero. initCodeClient chiama il proprio
+        // callback SOLO quando va a buon fine: se la finestra di Google viene
+        // chiusa, o il browser la blocca (sulla web app dell'iPhone succede
+        // spesso), non arriva niente e la promessa resta appesa per sempre.
+        // Il pulsante restava disabilitato su "Collegamento…" e non c'era piu'
+        // modo di riprovare senza ricaricare l'app.
+        var chiuso = false;
+        function finisci(errore, valore) {
+          if (chiuso) return;
+          chiuso = true;
+          clearTimeout(scaduto);
+          if (errore) no(errore); else ok(valore);
+        }
+        var scaduto = setTimeout(function () {
+          finisci(new Error('finestra di Google non completata'));
+        }, 90000);
+
+        // Il client si crea NUOVO a ogni tentativo, non si riusa.
+        // Tenendolo da parte, al secondo tentativo Google avrebbe richiamato le
+        // funzioni del primo, cioe' avrebbe risposto alla promessa sbagliata:
+        // il pulsante sarebbe rimasto fermo anche a collegamento riuscito.
+        var clientCodice = google.accounts.oauth2.initCodeClient({
             client_id: CLIENT_ID,
             scope: AMBITO_SHEETS,
             ux_mode: 'popup',
+            // Scatta se la finestra viene bloccata dal browser o chiusa.
+            error_callback: function (e) {
+              finisci(new Error((e && (e.message || e.type)) || 'finestra chiusa'));
+            },
             callback: function (r) {
-              if (!r || !r.code) { no(new Error((r && r.error) || 'accesso negato')); return; }
+              if (!r || !r.code) { finisci(new Error((r && r.error) || 'accesso negato')); return; }
               // Il codice va al custode della chiave, che lo scambia.
               apiPost({ op: 'oauthScambia', codice: r.code })
                 .then(function (j) {
@@ -444,13 +468,16 @@
                     try { localStorage.setItem(CHIAVE_RINNOVO, j.rinnovo); } catch (e) { /* privata */ }
                   }
                   accettaAccesso(j.accesso, j.durata);
-                  ok(tokenGoogle);
+                  finisci(null, tokenGoogle);
                 })
-                .catch(no);
+                .catch(function (e) { finisci(e); });
             }
           });
+        try {
+          clientCodice.requestCode();
+        } catch (e) {
+          finisci(new Error('non riesco ad aprire Google: ' + e.message));
         }
-        clientCodice.requestCode();
       });
     }
 
@@ -1552,11 +1579,16 @@
         b.hidden = true;
         return;
       }
-      // Con il gettone di rinnovo in mano non c'e' niente da chiedere
-      // all'utente: il permesso si sta gia' rifacendo da solo.
+      // Con il gettone di rinnovo in mano di solito non c'e' niente da chiedere
+      // all'utente: il permesso si sta rifacendo da solo. MA il pulsante non si
+      // nasconde comunque: se il rinnovo continua a fallire, nasconderlo lascia
+      // l'utente davanti a "Rinnovo il permesso…" per sempre, senza niente da
+      // premere. Un modo per intervenire a mano deve restare sempre.
       if (gettoneRinnovo()) {
-        s.textContent = 'Rinnovo il permesso…';
-        b.hidden = true;
+        s.textContent = attesaRinnovo ? 'Rinnovo il permesso, ci sta mettendo…' : 'Rinnovo il permesso…';
+        b.hidden = !attesaRinnovo; // compare solo se il primo tentativo e' andato male
+        b.textContent = 'Rifai accesso';
+        b.disabled = false;
         return;
       }
       s.textContent = haGiaCollegato()
