@@ -1571,9 +1571,30 @@
     // Due sole cose da dire: da quale strada passa il salvataggio, e se serve
     // un tocco per ricollegarsi. Mai un errore: senza collegamento l'app
     // funziona esattamente come prima.
+    // Dentro l'app Android il collegamento a Google NON puo' riuscire, e non e'
+    // un difetto nostro: Google vieta l'accesso OAuth dalle WebView
+    // incorporate, che e' esattamente cio' che l'app e'. La sua libreria non si
+    // avvia proprio, e il pulsante rispondeva "Google non caricato".
+    // Documentato: https://support.google.com/faqs/answer/12284343
+    // Per Android la strada indicata da Google e' aprire la richiesta in una
+    // scheda Chrome separata, cosa che va fatta nel codice nativo dell'app.
+    //
+    // Il riconoscimento e' certo, non indovinato dallo user agent: App.js
+    // inietta window.ReactNativeWebView, che esiste solo dentro il nostro
+    // guscio. Li' il pulsante si nasconde e si dice come stanno le cose,
+    // invece di offrire un tasto che non potra' mai funzionare.
+    function dentroAppAndroid() {
+      return !!window.ReactNativeWebView;
+    }
+
     function mostraStatoGoogle() {
       var s = document.getElementById('gStato');
       var b = document.getElementById('gCollega');
+      if (dentroAppAndroid() && !tokenValido()) {
+        s.textContent = 'Salvataggio tramite Apps Script (nell’app Android Google non permette il collegamento)';
+        b.hidden = true;
+        return;
+      }
       if (tokenValido()) {
         s.textContent = 'Scrittura diretta sul foglio, attiva';
         b.hidden = true;
